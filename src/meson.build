@@ -121,7 +121,7 @@ endif
 
 lite_includes += include_directories('.')
 
-executable('lite-xl',
+executable('superduino',
     lite_sources + lite_rc,
     include_directories: lite_includes,
     dependencies: lite_deps,

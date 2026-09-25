@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Superduino
+Comment=A lightweight code editor for Arduino and embedded development
+Exec=superduino %F
+Icon=superduino
+Terminal=false
+StartupWMClass=io.github.md_sakif.Superduino
+Categories=Development;IDE;Electronics;
+MimeType=text/plain;inode/directory;
