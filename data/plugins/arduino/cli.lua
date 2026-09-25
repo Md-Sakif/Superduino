@@ -78,6 +78,22 @@ function cli.find_global()
 end
 
 
+---Starts an arduino-cli command without waiting for it.
+---@param args string[] Arguments passed to arduino-cli.
+---@param options? { path?: string } `path` defaults to `cli.path`.
+---@return process? proc
+---@return string? error
+function cli.start(args, options)
+  local path = (options and options.path) or cli.path
+  if not path then return nil, "arduino-cli is not configured" end
+  local command = { path }
+  for _, arg in ipairs(args) do table.insert(command, arg) end
+  local ok, proc = pcall(process.start, command, { stdin = process.REDIRECT_DISCARD })
+  if not ok then return nil, tostring(proc) end
+  return proc
+end
+
+
 ---Runs an arduino-cli command and collects its output.
 ---Must be called from a thread (see `core.add_thread`).
 ---@param args string[] Arguments passed to arduino-cli.
@@ -87,12 +103,8 @@ end
 ---@return integer? exit_code
 function cli.run(args, options)
   options = options or {}
-  local path = options.path or cli.path
-  if not path then return nil, "arduino-cli is not configured" end
-  local command = { path }
-  for _, arg in ipairs(args) do table.insert(command, arg) end
-  local ok, proc = pcall(process.start, command, { stdin = process.REDIRECT_DISCARD })
-  if not ok then return nil, tostring(proc) end
+  local proc, start_err = cli.start(args, options)
+  if not proc then return nil, start_err end
   -- Read until the process exits. We can't use stream:read("all") because reads
   -- keep returning "" instead of nil after the process has exited.
   local out, err = {}, {}

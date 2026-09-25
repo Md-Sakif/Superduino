@@ -56,6 +56,152 @@ function project.load_boards()
 end
 
 
+---A board platform ("architecture") known to the Boards Manager.
+---@class arduino.platform
+---@field id string e.g. "arduino:esp32"
+---@field vendor string e.g. "arduino"
+---@field vendor_name string e.g. "Arduino"
+---@field name string e.g. "Arduino ESP32 Boards"
+---@field installed_version string? nil when not installed
+---@field latest_version string
+---@field board_names string[] Boards of the release that is (or would be) installed.
+---@field deprecated boolean
+
+local platforms_cache
+
+
+---Loads all platforms of the Boards Manager index, installed or not.
+---Downloads the index first when arduino-cli does not have one yet.
+---Must be called from a thread (see `core.add_thread`).
+---@return arduino.platform[]? platforms
+---@return string? error
+function project.load_platforms()
+  if platforms_cache then return platforms_cache end
+  local result, err = cli.run_json({ "core", "search" })
+  if not result or #(result.platforms or {}) == 0 then
+    -- a fresh arduino-cli has no index yet
+    local _, update_err = cli.run_json({ "core", "update-index" })
+    if update_err then return nil, update_err end
+    result, err = cli.run_json({ "core", "search" })
+    if not result then return nil, err end
+  end
+  local platforms = {}
+  for _, p in ipairs(result.platforms or {}) do
+    local vendor = type(p.id) == "string" and p.id:match("^([^:]+):")
+    if vendor then
+      local installed = p.installed_version ~= "" and p.installed_version or nil
+      local releases = p.releases or {}
+      local release = releases[installed or ""] or releases[p.latest_version or ""] or {}
+      local board_names = {}
+      for _, board in ipairs(release.boards or {}) do
+        if type(board.name) == "string" then table.insert(board_names, board.name) end
+      end
+      local name = release.name or p.id
+      table.insert(platforms, {
+        id = p.id,
+        vendor = vendor,
+        vendor_name = p.maintainer or vendor,
+        name = name,
+        installed_version = installed,
+        latest_version = p.latest_version or "",
+        board_names = board_names,
+        deprecated = p.deprecated == true or name:find("DEPRECATED", 1, true) ~= nil,
+      })
+    end
+  end
+  platforms_cache = platforms
+  return platforms
+end
+
+
+---Forgets the loaded boards and platforms, e.g. after installing a platform.
+function project.forget_cache()
+  boards_cache, platforms_cache = nil, nil
+end
+
+
+---Progress reported while installing a platform.
+---@class arduino.install_event
+---@field kind "progress"|"downloaded"|"installing"|"installed"|"message"
+---@field item? string Package being handled, e.g. "arduino:avr-gcc@7.3.0-atmel3.6.1-arduino7".
+---@field done? string Downloaded amount, e.g. "5.28 MiB".
+---@field total? string Download size, e.g. "25.84 MiB".
+---@field percent? number
+---@field eta? string Time left, e.g. "00m21s".
+---@field text? string For "message" events.
+
+-- Turns one line of `arduino-cli core install` output into an event.
+local function parse_install_line(line)
+  line = line:gsub("%s+$", "")
+  if line == "" or line:find("^Skipping .* configuration") then return end
+  local item, done, total, percent, eta = line:match("^(%S+) (.-) / (.-)%s+([%d%.]+)%%%s*(%S*)$")
+  if item then
+    return { kind = "progress", item = item, done = done, total = total,
+      percent = tonumber(percent), eta = eta ~= "" and eta or nil }
+  end
+  item = line:match("^(%S+) already downloaded$") or line:match("^(%S+) downloaded$")
+  if item then return { kind = "downloaded", item = item } end
+  item = line:match("^Installing platform (%S+)%.%.%.$") or line:match("^Installing (%S+)%.%.%.$")
+  if item then return { kind = "installing", item = item } end
+  item = line:match("^Platform (%S+) installed$") or line:match("^(%S+) installed$")
+  if item then return { kind = "installed", item = item } end
+  return { kind = "message", text = line }
+end
+
+
+---Installs a platform with `arduino-cli core install`, reporting progress.
+---Set `handle.cancelled = true` to stop it; the process is then killed.
+---Must be called from a thread (see `core.add_thread`).
+---@param id string Platform id, e.g. "arduino:esp32".
+---@param handle table Receives `proc`; checked for `cancelled`.
+---@param on_event fun(event: arduino.install_event)
+---@return boolean installed
+---@return string? error "cancelled" when cancelled
+function project.install_platform(id, handle, on_event)
+  local proc, err = cli.start({ "core", "install", id })
+  if not proc then return false, err end
+  handle.proc = proc
+  local buffer, errors = "", {}
+  while true do
+    if handle.cancelled then
+      proc:kill()
+      return false, "cancelled"
+    end
+    local running = proc:running()
+    local out = proc:read_stdout(4096)
+    local err_chunk = proc:read_stderr(4096)
+    if err_chunk and #err_chunk > 0 then table.insert(errors, err_chunk) end
+    if out and #out > 0 then
+      buffer = buffer .. out
+      -- progress lines are separated by \r, other lines by \n
+      while true do
+        local s, e = buffer:find("[\r\n]")
+        if not s then break end
+        local event = parse_install_line(buffer:sub(1, s - 1))
+        buffer = buffer:sub(e + 1)
+        if event then on_event(event) end
+      end
+      -- the latest progress update is not terminated until the next one arrives
+      local partial = parse_install_line(buffer)
+      if partial and partial.kind == "progress" then on_event(partial) end
+    elseif not running then
+      break
+    else
+      coroutine.yield(0.1)
+    end
+  end
+  if buffer ~= "" then
+    local event = parse_install_line(buffer)
+    if event then on_event(event) end
+  end
+  if proc:returncode() ~= 0 then
+    local message = table.concat(errors):gsub("%s+$", ""):match("[^\n]*$")
+    return false, (message ~= "" and message) or ("arduino-cli exited with code " .. tostring(proc:returncode()))
+  end
+  return true
+end
+
+
 ---Returns the sketchbook folder configured in arduino-cli.
 ---Must be called from a thread (see `core.add_thread`).
 ---@return string?
