@@ -286,7 +286,8 @@ end
 
 function TreeView:update()
   -- update width
-  local dest = self.visible and self.target_size or 0
+  -- collapse the sidebar while no project folder is open
+  local dest = (self.visible and #core.projects > 0) and self.target_size or 0
   if self.init_size then
     self.size.x = dest
     self.init_size = false
@@ -581,7 +582,7 @@ local function is_project_folder(item)
 end
 
 local function is_primary_project_folder(path)
-  return core.root_project().path == path
+  return core.root_project() ~= nil and core.root_project().path == path
 end
 
 

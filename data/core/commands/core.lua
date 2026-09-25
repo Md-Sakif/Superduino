@@ -11,9 +11,10 @@ local restore_title_view = false
 
 local function suggest_directory(text)
   text = common.home_expand(text)
-  local basedir = common.dirname(core.root_project().path)
+  local project = core.root_project()
+  local basedir = project and common.dirname(project.path) or HOME
   return common.home_encode_list((basedir and text == basedir .. PATHSEP or text == "") and
-    core.recent_projects or common.dir_path_suggest(text, core.root_project().path))
+    core.recent_projects or common.dir_path_suggest(text, project and project.path or HOME))
 end
 
 local function check_directory_path(path)
@@ -35,9 +36,14 @@ local function open_file(use_dialog)
         default_text = dirname
       else
         dirname = core.normalize_to_project_dir(dirname)
-        default_text = dirname == core.root_project().path and "" or common.home_encode(dirname) .. PATHSEP
+        local project = core.root_project()
+        default_text = (project and dirname == project.path) and "" or common.home_encode(dirname) .. PATHSEP
       end
     end
+  end
+
+  if not default_text and not core.root_project() and HOME then
+    default_text = use_dialog and HOME or common.home_encode(HOME) .. PATHSEP
   end
 
   if use_dialog then
@@ -89,7 +95,8 @@ local function open_file(use_dialog)
 end
 
 local function open_directory(label, use_dialog, allow_many, callback)
-  local dirname = common.dirname(core.root_project().path)
+  local project = core.root_project()
+  local dirname = project and common.dirname(project.path) or HOME
   local text
   if dirname then
     text = use_dialog and dirname or common.home_encode(dirname) .. PATHSEP
@@ -127,7 +134,8 @@ end
 
 local function change_project_directory(use_dialog)
   open_directory("Change Project Folder", use_dialog, false, function(abs_path)
-    if abs_path[1] == core.root_project().path then return end
+    local project = core.root_project()
+    if project and abs_path[1] == project.path then return end
     core.confirm_close_docs(core.docs, function(dirpath)
       core.open_project(dirpath)
     end, abs_path[1])
@@ -136,7 +144,15 @@ end
 
 local function open_project_directory(use_dialog)
   open_directory("Open Project", use_dialog, false, function(abs_path)
-    if abs_path[1] == core.root_project().path then
+    local project = core.root_project()
+    if not project then
+      -- nothing is open yet, so use the current window
+      core.confirm_close_docs(core.docs, function(dirpath)
+        core.open_project(dirpath)
+      end, abs_path[1])
+      return
+    end
+    if abs_path[1] == project.path then
       core.error("Directory %q is currently opened", abs_path[1])
       return
     end

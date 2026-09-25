@@ -172,6 +172,7 @@ end
 
 
 local function save_workspace()
+  if not core.root_project() then return end
   local project_dir = common.basename(core.root_project().path)
   local id_list = {}
   for filename, id in workspace_keys_for(project_dir) do
@@ -187,6 +188,7 @@ end
 
 
 local function load_workspace()
+  if not core.root_project() then return end
   local workspace = consume_workspace(core.root_project().path)
   if workspace then
     local root = get_unlocked_root(core.root_view.root_node)

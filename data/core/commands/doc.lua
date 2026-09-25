@@ -583,7 +583,8 @@ local commands = {
     elseif last_doc and last_doc.filename then
       local dirname, filename = core.last_active_view.doc.abs_filename:match("(.*)[/\\](.+)$")
       text = core.normalize_to_project_dir(dirname) .. PATHSEP
-      if text == core.root_project().path then text = "" end
+      local project = core.root_project()
+      if project and text == project.path then text = "" end
     end
     core.command_view:enter("Save As", {
       text = text,

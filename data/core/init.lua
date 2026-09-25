@@ -24,10 +24,11 @@ local function load_session()
 end
 
 
-local function save_session()
+local function save_session(project_path)
   local fp = io.open(USERDIR .. PATHSEP .. "session.lua", "w")
   if fp then
     fp:write("return {recents=", common.serialize(core.recent_projects),
+      ", project=", common.serialize(project_path or false),
       ", window=", common.serialize(table.pack(system.get_window_size(core.window))),
       ", window_mode=", common.serialize(system.get_window_mode(core.window)),
       ", previous_find=", common.serialize(core.previous_find),
@@ -287,7 +288,7 @@ function core.init()
   core.previous_find = {}
   core.previous_replace = {}
 
-  local project_dir = core.recent_projects[1] or "."
+  local project_dir = RESTARTED and session.project or nil
   local project_dir_explicit = false
   local files = {}
   if not RESTARTED then
@@ -353,19 +354,20 @@ function core.init()
   -- Load default commands first so plugins can override them
   command.add_defaults()
 
-  local project_dir_abs = system.absolute_path(project_dir)
-  -- We prevent set_project below to effectively add and scan the directory because the
-  -- project module and its ignore files is not yet loaded.
-  if project_dir_abs and pcall(core.set_project, project_dir_abs) then
-    if project_dir_explicit then
-      update_recents_project("add", project_dir_abs)
-    end
-  else
-    if not project_dir_explicit then
+  -- Without a project directory we start with no project and show the welcome screen.
+  if project_dir then
+    local project_dir_abs = system.absolute_path(project_dir)
+    -- We prevent set_project below to effectively add and scan the directory because the
+    -- project module and its ignore files is not yet loaded.
+    if project_dir_abs and pcall(core.set_project, project_dir_abs) then
+      if project_dir_explicit then
+        update_recents_project("add", project_dir_abs)
+      end
+      local pdir, pname = project_dir_abs:match("(.*)[/\\\\](.*)")
+      core.log_quiet("Opening project %q from directory %s", pname, pdir)
+    elseif not project_dir_explicit then
       update_recents_project("remove", project_dir)
     end
-    project_dir_abs = system.absolute_path(".")
-    local status, err = pcall(core.set_project, project_dir_abs)
   end
 
   -- Load core and user plugins giving preference to user ones with same name.
@@ -378,11 +380,6 @@ function core.init()
     system.set_window_mode(core.window, "maximized")
   end
 
-
-  do
-    local pdir, pname = project_dir_abs:match("(.*)[/\\\\](.*)")
-    core.log_quiet("Opening project %q from directory %s", pname, pdir)
-  end
 
   for _, filename in ipairs(files) do
     core.root_view:open_doc(core.open_doc(filename))
@@ -479,8 +476,9 @@ end
 function core.exit(quit_fn, force)
   if force then
     core.delete_temp_files()
+    local root_project = core.root_project()
     while #core.projects > 0 do core.remove_project(core.projects[#core.projects], true) end
-    save_session()
+    save_session(root_project and root_project.path)
     quit_fn()
   else
     core.confirm_close_docs(core.docs, core.exit, quit_fn, true)
@@ -598,8 +596,10 @@ function core.load_plugins()
   }
   local files, ordered = {}, {
     { priority = -2, load = load_lua_plugin_if_exists, version_match = true, file = USERDIR .. PATHSEP .. "init.lua", name = "User Module" },
-    { priority = -1, load = load_lua_plugin_if_exists, version_match = true, file = core.root_project().path .. PATHSEP .. ".lite_project.lua", name = "Project Module" }
   }
+  if core.root_project() then
+    table.insert(ordered, { priority = -1, load = load_lua_plugin_if_exists, version_match = true, file = core.root_project().path .. PATHSEP .. ".lite_project.lua", name = "Project Module" })
+  end
   for _, root_dir in ipairs {DATADIR, USERDIR} do
     local plugin_dir = root_dir .. PATHSEP .. "plugins"
     for _, filename in ipairs(system.list_dir(plugin_dir) or {}) do
@@ -744,8 +744,8 @@ function core.project_for_path(path)
   return nil
 end
 -- Legacy interface; do not use. Use a specific project instead. When in doubt, use root_project.
-function core.normalize_to_project_dir(path) core.deprecation_log("core.normalize_to_project_dir") return core.root_project():normalize_path(path) end
-function core.project_absolute_path(path) core.deprecation_log("core.project_absolute_path") return core.root_project() and core.root_project():absolute_path(path) or system.absolute_path(path) end
+function core.normalize_to_project_dir(path) core.deprecation_log("core.normalize_to_project_dir") return core.root_project() and core.root_project():normalize_path(path) or common.normalize_path(path) end
+function core.project_absolute_path(path) core.deprecation_log("core.project_absolute_path") return core.root_project() and core.root_project():absolute_path(path) or Project.absolute_path(nil, common.normalize_path(path)) end
 
 function core.open_doc(filename)
   local new_file = true
@@ -753,8 +753,14 @@ function core.open_doc(filename)
   if filename then
     -- normalize filename and set absolute filename then
     -- try to find existing doc for filename
-    filename = core.root_project():normalize_path(filename)
-    abs_filename = core.root_project():absolute_path(filename)
+    local project = core.root_project()
+    if project then
+      filename = project:normalize_path(filename)
+      abs_filename = project:absolute_path(filename)
+    else
+      filename = common.normalize_path(filename)
+      abs_filename = Project.absolute_path(nil, filename)
+    end
     new_file = not system.get_file_info(abs_filename)
     for _, doc in ipairs(core.docs) do
       if doc.abs_filename and abs_filename == doc.abs_filename then

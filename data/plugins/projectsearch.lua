@@ -222,7 +222,7 @@ function ResultsView:draw()
       renderer.draw_rect(x, y, w, h, style.line_highlight)
     end
     x = x + style.padding.x
-    local text = string.format("%s at line %d (col %d): ", core.root_project():normalize_path(item.file), item.line, item.col)
+    local text = string.format("%s at line %d (col %d): ", core.root_project() and core.root_project():normalize_path(item.file) or item.file, item.line, item.col)
     x = common.draw_text(style.font, style.dim, text, "left", x, y, w, h)
     x = common.draw_text(style.code_font, color, item.text, "left", x, y, w, h)
     self.max_h_scroll = math.max(self.max_h_scroll, x)

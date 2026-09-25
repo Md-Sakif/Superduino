@@ -407,7 +407,11 @@ function RootView:on_file_dropped(filename, x, y)
         },
         function(opt)
           if opt.text == "Current window" then
-            core.add_project(abspath)
+            if core.root_project() then
+              core.add_project(abspath)
+            else
+              core.confirm_close_docs(core.docs, core.open_project, abspath)
+            end
           elseif opt.text == "New window" then
             system.exec(string.format("%q %q", EXEFILE, filename))
           end
@@ -426,7 +430,7 @@ function RootView:on_file_dropped(filename, x, y)
     else
       -- change project directory
       core.confirm_close_docs(core.docs, function(dirpath)
-        core.open_folder_project(dirpath)
+        core.open_project(dirpath)
       end, system.absolute_path(filename))
       self.first_dnd_processed = true
     end
