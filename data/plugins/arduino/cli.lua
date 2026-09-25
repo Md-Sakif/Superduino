@@ -36,6 +36,14 @@ cli.error = nil
 -- incremented on every check so results of outdated checks are ignored
 local check_id = 0
 
+---Functions called after every check finishes, e.g. to refresh things that use arduino-cli.
+---@type fun()[]
+cli.on_checked = {}
+
+local function notify_checked()
+  for _, fn in ipairs(cli.on_checked) do core.try(fn) end
+end
+
 
 local function is_file(path)
   local info = path and system.get_file_info(path)
@@ -169,11 +177,13 @@ function cli.check()
   core.redraw = true
   if not path then
     cli.status = "not_found"
+    notify_checked()
     return
   end
   if not is_file(path) then
     cli.status = "missing"
     core.warn("arduino-cli not found at %s", path)
+    notify_checked()
     return
   end
   cli.status = "checking"
@@ -188,6 +198,7 @@ function cli.check()
       core.warn("arduino-cli at %s is not working: %s", path, err)
     end
     core.redraw = true
+    notify_checked()
   end)
 end
 

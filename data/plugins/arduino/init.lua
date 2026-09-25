@@ -8,6 +8,8 @@ local EmptyView = require "core.emptyview"
 local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
 local NewProjectView = require "plugins.arduino.newprojectview"
+local access = require "plugins.arduino.access"
+require "plugins.arduino.access_ui"
 
 
 local function open_url(url)
@@ -130,6 +132,7 @@ EmptyView.add_section({
 })
 
 
+table.insert(cli.on_checked, access.refresh)
 cli.init()
 project.open_pending()
 

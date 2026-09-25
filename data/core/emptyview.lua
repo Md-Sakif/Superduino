@@ -20,7 +20,7 @@ function EmptyView:__tostring() return "EmptyView" end
 ---@field id string Unique and stable across frames; used to track hovering.
 ---@field label string
 ---@field detail? string Secondary text.
----@field detail_align? "left"|"right" "right" aligns the detail to the right edge (e.g. shortcuts), "left" puts it after the label, shortening it like a path when too long.
+---@field detail_align? "left"|"right"|"text" "right" aligns the detail to the right edge (e.g. shortcuts), "left" puts it after the label, shortening it like a path when too long, "text" puts it after the label, cutting off its end when too long.
 ---@field color? renderer.color Label color; defaults to `style.accent` for clickable rows and `style.text` otherwise.
 ---@field run? fun() Called when the row is clicked; rows without it are not clickable.
 
@@ -113,6 +113,18 @@ end
 
 ---Shortens a path to fit in `max_w` pixels, replacing middle folders with an ellipsis.
 EmptyView.shorten_path = shorten_path
+
+
+-- Cuts text to fit in max_w, ending it with an ellipsis when shortened.
+local function truncate_text(font, text, max_w)
+  if font:get_width(text) <= max_w then return text end
+  local ellipsis = "\u{2026}"
+  local cut = text
+  while cut ~= "" and font:get_width(cut .. ellipsis) > max_w do
+    cut = cut:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
+  end
+  return cut ~= "" and (cut:gsub("%s+$", "") .. ellipsis) or ""
+end
 
 
 local function format_binding(binding)
@@ -273,7 +285,9 @@ function EmptyView:draw_item(item)
       common.draw_text(style.font, style.dim, item.detail, "right", x, item.y, w - style.padding.x, item.h)
     else
       local detail_x = label_end + style.padding.x
-      local detail = shorten_path(style.font, item.detail, x + w - style.padding.x - detail_x)
+      local max_w = x + w - style.padding.x - detail_x
+      local detail = item.detail_align == "text" and truncate_text(style.font, item.detail, max_w)
+        or shorten_path(style.font, item.detail, max_w)
       common.draw_text(style.font, style.dim, detail, "left", detail_x, item.y, 0, item.h)
     end
   end

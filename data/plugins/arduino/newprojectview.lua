@@ -8,6 +8,7 @@ local style = require "core.style"
 local View = require "core.view"
 local EmptyView = require "core.emptyview"
 local project = require "plugins.arduino.project"
+local access = require "plugins.arduino.access"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -329,7 +330,7 @@ function NewProjectView:next()
     return
   end
   if self.install then
-    if self.install.state ~= "running" then self:start_install() end
+    self:install_next()
     return
   end
   local item = self:get_list()[self.selected]
@@ -352,8 +353,7 @@ end
 
 function NewProjectView:back()
   if self.install then
-    if self.install.state ~= "running" then self.install = nil end
-    core.redraw = true
+    self:install_back()
     return
   end
   if self.creating or self.step == 1 then return end
@@ -512,16 +512,114 @@ function NewProjectView:start_install()
     core.redraw = true
     project.forget_cache()
     local loaded, load_err = self:load_data()
-    self.install = nil
     if not loaded then
+      self.install = nil
       self:set_message(load_err, true)
       return
     end
     core.log("Installed %s", install.platform.name)
-    self.choice[2], self.choice[3] = install.platform.id, nil
-    self:enter_step(3)
-    self:set_message("Installed " .. install.platform.name .. ". Now choose your board.", false)
+    -- some families ship a script that installs USB permission rules (Linux only)
+    local version
+    for _, board in ipairs(self.boards) do
+      if board.arch == install.platform.id then version = board.version break end
+    end
+    local script = version and access.setup_script(install.platform.id, version)
+    if script and access.setup_record(install.platform.id, version) ~= "done" then
+      install.setup = { id = install.platform.id, name = install.platform.name, version = version, script = script }
+      install.state = "setup"
+      core.redraw = true
+      return
+    end
+    self:finish_install(install, "Installed " .. install.platform.name .. ". Now choose your board.")
   end)
+end
+
+
+function NewProjectView:finish_install(install, message)
+  self.install = nil
+  self.choice[2], self.choice[3] = install.platform.id, nil
+  self:enter_step(3)
+  self:set_message(message, false)
+end
+
+
+function NewProjectView:start_setup()
+  local install = self.install
+  install.state, install.setup_output = "setup-running", nil
+  core.redraw = true
+  core.add_thread(function()
+    local result, output = access.run_setup(install.setup)
+    if self.install ~= install then return end
+    if result == "ok" then
+      self:finish_install(install, "Installed " .. install.platform.name
+        .. " and set up USB access. Now choose your board.")
+    elseif result == "cancelled" then
+      install.state = "setup"
+      install.setup_note = "The password dialog was closed. You can try again, or skip and do it later from the welcome screen."
+    elseif result == "unavailable" then
+      install.state = "setup-unavailable"
+    else
+      install.state, install.setup_output = "setup-failed", output
+    end
+    core.redraw = true
+  end)
+end
+
+
+function NewProjectView:skip_setup()
+  local install = self.install
+  access.record_setup(install.setup.id, install.setup.version, "skipped")
+  core.add_thread(access.check_setups)
+  self:finish_install(install, "Installed " .. install.platform.name
+    .. ". USB setup was skipped; you can run it later from the welcome screen. Now choose your board.")
+end
+
+
+function NewProjectView:toggle_script()
+  local install = self.install
+  if install.script_lines then
+    install.script_lines = nil
+  else
+    local fp = io.open(install.setup.script)
+    install.script_lines = {}
+    if fp then
+      for line in fp:lines() do table.insert(install.script_lines, (line:gsub("\t", "    "))) end
+      fp:close()
+    end
+  end
+  core.redraw = true
+end
+
+
+function NewProjectView:copy_setup_command()
+  local text = access.terminal_command({ "/bin/bash", self.install.setup.script })
+  system.set_clipboard(text)
+  core.log("Copied: %s", text)
+end
+
+
+-- Enter/Next while the install panel is open.
+function NewProjectView:install_next()
+  local state = self.install.state
+  if state == "confirm" or state == "failed" then
+    self:start_install()
+  elseif state == "setup" or state == "setup-failed" then
+    self:start_setup()
+  elseif state == "setup-unavailable" then
+    self:skip_setup()
+  end
+end
+
+
+-- Esc/Back while the install panel is open.
+function NewProjectView:install_back()
+  local state = self.install.state
+  if state == "confirm" or state == "failed" then
+    self.install = nil
+  elseif state == "setup" or state == "setup-failed" or state == "setup-unavailable" then
+    self:skip_setup()
+  end
+  core.redraw = true
 end
 
 
@@ -629,6 +727,7 @@ function NewProjectView:layout()
   L.message_y = L.buttons_y - pad_y - row_h
 
   local next_text, next_run, next_enabled = "Next  →", function() self:next() end, true
+  local extra_text, extra_run
   local back_text, back_run = self.step > 1 and "←  Back" or nil, function() self:back() end
   L.next_primary = true
   if self.install then
@@ -639,8 +738,19 @@ function NewProjectView:layout()
       next_text, next_run, back_text = "Cancel", function() self:cancel_install() end, nil
       next_enabled = not self.install.handle.cancelled
       L.next_primary = false
-    else
+    elseif state == "failed" then
       next_text, back_text = "Try Again", "←  Back"
+    elseif state == "setup" then
+      next_text, back_text = "Set Up Now", "Skip"
+      extra_text = self.install.script_lines and "Hide Script" or "Show Script"
+      extra_run = function() self:toggle_script() end
+    elseif state == "setup-running" then
+      next_text, back_text, next_enabled = "Waiting...", nil, false
+    elseif state == "setup-failed" then
+      next_text, back_text = "Try Again", "Skip"
+    elseif state == "setup-unavailable" then
+      next_text, back_text = "Continue", nil
+      extra_text, extra_run = "Copy Command", function() self:copy_setup_command() end
     end
   elseif self.step == NAME_STEP then
     next_text = "Create Project"
@@ -654,6 +764,12 @@ function NewProjectView:layout()
     enabled = next_enabled }
   if L.next.enabled then
     self:add_target(L.next.id, L.next.x, L.next.y, L.next.w, L.next.h, next_run)
+  end
+  if extra_text then
+    local extra_w = font:get_width(extra_text) + pad_x * 3
+    L.extra = { id = "button:extra", text = extra_text, x = L.next.x - pad_x - extra_w, y = L.buttons_y, w = extra_w,
+      h = button_h, enabled = true }
+    self:add_target(L.extra.id, L.extra.x, L.extra.y, L.extra.w, L.extra.h, extra_run)
   end
   if back_text then
     local back_w = font:get_width(back_text) + pad_x * 3
@@ -804,10 +920,45 @@ function NewProjectView:draw_install_panel(panel)
         y = y + line_h
       end
     end
-  else
+  elseif install.state == "failed" then
     paragraph("Could not install " .. platform.name, style.error)
     paragraph(install.error or "Unknown error", style.text)
     paragraph("Check your internet connection and try again.", style.dim)
+  else
+    local setup = install.setup
+    paragraph(platform.name .. " is installed. One more step: USB access", style.accent)
+    if install.state == "setup-running" then
+      paragraph("Waiting for your password in the system dialog...", style.text)
+    elseif install.state == "setup-failed" then
+      paragraph("The setup script failed:", style.error)
+      paragraph(install.setup_output ~= "" and install.setup_output or "no output", style.text)
+    elseif install.state == "setup-unavailable" then
+      paragraph("Superduino could not show a password dialog because pkexec is not installed. "
+        .. "You can run this command in a terminal instead:", style.text)
+      paragraph(access.terminal_command({ "/bin/bash", setup.script }), style.accent)
+    else
+      paragraph("Some boards in this family use a special USB mode for uploading. Linux needs a permission rule "
+        .. "(a udev rule) for it, which this family provides as a setup script.", style.text)
+      paragraph("It runs once as administrator; your computer will ask for your password. You can also skip it "
+        .. "and run it later from the welcome screen.", style.dim)
+      if install.setup_note then paragraph(install.setup_note, style.warn) end
+    end
+    local label_end = common.draw_text(font, style.dim, "Script:", "left", x, y, 0, line_h)
+    local path_x = label_end + pad_x / 2
+    common.draw_text(font, style.dim, EmptyView.shorten_path(font, common.home_encode(setup.script), x + w - path_x),
+      "left", path_x, y, 0, line_h)
+    y = y + line_h + pad_y / 2
+    if install.script_lines then
+      renderer.draw_rect(x, y, w, math.max(0, panel.y + panel.h - y - pad_y), style.background)
+      local code_font = style.code_font
+      local code_h = code_font:get_height() + math.floor(2 * SCALE)
+      local cy = y + pad_y / 2
+      for _, line in ipairs(install.script_lines) do
+        if cy > panel.y + panel.h then break end
+        common.draw_text(code_font, style.text, line, "left", x + pad_x / 2, cy, 0, code_h)
+        cy = cy + code_h
+      end
+    end
   end
   core.pop_clip_rect()
 end
@@ -933,10 +1084,18 @@ function NewProjectView:draw()
   end
 
   self:draw_button(L.back, false)
+  self:draw_button(L.extra, false)
   self:draw_button(L.next, L.next_primary)
   local keys_hint = KEYS_HINT
   if self.install then
-    keys_hint = ({ confirm = "Enter: install    Esc: not now", failed = "Enter: try again    Esc: go back" })[self.install.state] or ""
+    keys_hint = ({
+      confirm = "Enter: install    Esc: not now",
+      failed = "Enter: try again    Esc: go back",
+      setup = "Enter: set up now    Esc: skip",
+      ["setup-failed"] = "Enter: try again    Esc: skip",
+    })[self.install.state] or ""
+    -- the middle button takes the hint's place
+    if L.extra then keys_hint = "" end
   end
   common.draw_text(font, style.dim, keys_hint, "center", L.x, L.buttons_y, L.w, L.next.h)
 end
