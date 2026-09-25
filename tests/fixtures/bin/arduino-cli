@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Stand-in for arduino-cli used by the Superduino testbench.
+
+It mimics the JSON and progress output of the real arduino-cli (1.5.x) for
+the commands Superduino uses, without network access or large downloads.
+
+State lives in $SUPERDUINO_TEST_DIR/fake-cli-state.json and starts from
+DEFAULT_STATE merged with $SUPERDUINO_TEST_DIR/fake-cli-overrides.json,
+which tests write to set up a scenario. Every call is appended to
+$SUPERDUINO_TEST_DIR/fake-cli-calls.log.
+"""
+import json
+import os
+import sys
+import time
+
+TEST_DIR = os.environ.get("SUPERDUINO_TEST_DIR", os.getcwd())
+STATE_FILE = os.path.join(TEST_DIR, "fake-cli-state.json")
+OVERRIDES_FILE = os.path.join(TEST_DIR, "fake-cli-overrides.json")
+CALLS_FILE = os.path.join(TEST_DIR, "fake-cli-calls.log")
+HOME = os.environ.get("HOME", TEST_DIR)
+
+AVR_BOARDS = [
+    ("Arduino UNO", "uno"), ("Arduino Nano", "nano"), ("Arduino Mega or Mega 2560", "mega"),
+    ("Arduino BT", "bt"), ("Arduino UNO Mini", "unomini"), ("Arduino Leonardo", "leonardo"),
+]
+
+DEFAULT_STATE = {
+    "version": "1.5.1",
+    "offline": False,          # network errors for update-index / install
+    "has_index": True,         # False: like a fresh arduino-cli without package_index.json
+    "install_fail": None,      # platform id whose install fails (not a network error)
+    "install_slow": None,      # platform id whose "Installing ..." phase takes long (for cancel tests)
+    "additional_urls": [],
+    "bad_urls": [],            # additional URLs that cannot be downloaded
+    # platforms that appear in the index once their additional URL is added
+    "url_platforms": {},
+    "installed": {"arduino:avr": "1.8.8"},
+    "platforms": {
+        "arduino:avr": {"maintainer": "Arduino", "name": "Arduino AVR Boards", "latest": "1.8.8",
+                        "boards": [[n, "arduino:avr:" + b] for n, b in AVR_BOARDS]},
+        "arduino:samd": {"maintainer": "Arduino", "name": "Arduino SAMD Boards (32-bits ARM Cortex-M0+)",
+                         "latest": "1.8.14",
+                         "boards": [["Arduino Zero", "arduino:samd:arduino_zero_edbg"],
+                                    ["Arduino MKR WiFi 1010", "arduino:samd:mkrwifi1010"]]},
+        "arduino:renesas_uno": {"maintainer": "Arduino", "name": "Arduino UNO R4 Boards", "latest": "1.6.0",
+                                "post_install": True,
+                                "boards": [["Arduino UNO R4 Minima", "arduino:renesas_uno:minima"],
+                                           ["Arduino UNO R4 WiFi", "arduino:renesas_uno:unor4wifi"]]},
+        "esp32:esp32": {"maintainer": "Espressif Systems", "name": "esp32", "latest": "3.3.11",
+                        "boards": [["ESP32 Dev Module", "esp32:esp32:esp32"],
+                                   ["ESP32-S3 Dev Module", "esp32:esp32:esp32s3"]]},
+        "arduino:mbed": {"maintainer": "Arduino", "deprecated": True, "latest": "3.3.0",
+                         "name": "[DEPRECATED - Please install standalone packages] Arduino Mbed OS Boards",
+                         "boards": [["Arduino Nano 33 BLE", "arduino:mbed:nano33ble"]]},
+    },
+    # examples returned by `lib examples`, keyed by platform id
+    "examples": {
+        "arduino:avr": [
+            {"library": "EEPROM", "name": "eeprom_read", "files": {"eeprom_read.ino": "// eeprom_read example\n"}},
+            {"library": "SoftwareSerial", "name": "SoftwareSerialExample",
+             "files": {"SoftwareSerialExample.ino": "// SoftwareSerial example\n", "notes.h": "// helper\n"}},
+        ],
+    },
+}
+
+NETWORK_ERROR = ('Download failed: performing HEAD request: Head "https://downloads.arduino.cc/{what}": '
+                 'dial tcp: lookup downloads.arduino.cc: no such host')
+
+
+def log_call(args):
+    with open(CALLS_FILE, "a") as fp:
+        fp.write(" ".join(args) + "\n")
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as fp:
+            return json.load(fp)
+    state = json.loads(json.dumps(DEFAULT_STATE))
+    if os.path.exists(OVERRIDES_FILE):
+        with open(OVERRIDES_FILE) as fp:
+            overrides = json.load(fp)
+        for key, value in overrides.items():
+            if key == "platforms":
+                state["platforms"].update(value)
+            else:
+                state[key] = value
+    save_state(state)
+    return state
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as fp:
+        json.dump(state, fp, indent=1)
+
+
+def data_dir():
+    return os.path.join(HOME, ".arduino15")
+
+
+def user_dir():
+    return os.path.join(HOME, "Arduino")
+
+
+def out(obj):
+    print(json.dumps(obj, indent=2))
+
+
+def fail(message, warnings=None, code=1):
+    obj = {"error": message}
+    if warnings:
+        obj["warnings"] = warnings
+    if JSON:
+        out(obj)
+    else:
+        sys.stderr.write(message + "\n")
+    sys.exit(code)
+
+
+def all_platforms(state):
+    platforms = dict(state["platforms"])
+    for url in state["additional_urls"]:
+        platforms.update(state["url_platforms"].get(url, {}))
+    return platforms
+
+
+def platform_dir(pid, version):
+    vendor, arch = pid.split(":")
+    return os.path.join(data_dir(), "packages", vendor, "hardware", arch, version)
+
+
+def release(p, version):
+    return {"name": p["name"], "version": version, "types": ["Arduino"],
+            "boards": [{"name": n} for n, _ in p["boards"]], "compatible": True}
+
+
+def platform_json(state, pid, p):
+    installed = state["installed"].get(pid, "")
+    versions = {p["latest"]}
+    if installed:
+        versions.add(installed)
+    obj = {"id": pid, "maintainer": p["maintainer"], "website": "", "email": "", "indexed": True,
+           "releases": {v: release(p, v) for v in versions},
+           "installed_version": installed, "latest_version": p["latest"]}
+    if p.get("deprecated"):
+        obj["deprecated"] = True
+    return obj
+
+
+def update_index(state):
+    if state["offline"]:
+        fail("Some indexes could not be updated.",
+             ["Error initializing instance: Error downloading index "
+              "'https://downloads.arduino.cc/packages/package_index.tar.bz2': "
+              + NETWORK_ERROR.format(what="packages/package_index.tar.bz2")])
+    bad = [u for u in state["additional_urls"] if u in state["bad_urls"]]
+    state["has_index"] = True
+    save_state(state)
+    if bad:
+        fail("Some indexes could not be updated.",
+             ["Error initializing instance: Error downloading index '%s': Download failed: "
+              "Server responded with: 404 Not Found" % u for u in bad])
+    out({"updated_indexes": [{"index_url": u, "status": "updated"}
+                             for u in ["https://downloads.arduino.cc/packages/package_index.tar.bz2"]
+                             + state["additional_urls"]]})
+
+
+def progress(item, total_kib):
+    for step in range(0, 101, 25):
+        done = total_kib * step / 100
+        sys.stdout.write("\r%s %.2f KiB / %.2f KiB   %.2f%% 00m0%ds" % (item, done, total_kib, step, (100 - step) // 25))
+        sys.stdout.flush()
+        time.sleep(0.03)
+    sys.stdout.write("\r%s downloaded\n" % item)
+    sys.stdout.flush()
+
+
+def core_install(state, pid):
+    platforms = all_platforms(state)
+    pid = pid.split("@")[0]
+    if pid not in platforms:
+        fail("Error during install: Platform '%s' not found" % pid)
+    if state["offline"]:
+        fail("Error during install: " + NETWORK_ERROR.format(what="cores/" + pid.replace(":", "-") + ".tar.bz2"))
+    p = platforms[pid]
+    version = p["latest"]
+    tool = "%s:fake-gcc@1.0.0" % pid.split(":")[0]
+    item = "%s@%s" % (pid, version)
+    print("Downloading packages...")
+    sys.stdout.flush()
+    progress(tool, 2048.0)
+    progress(item, 64.0)
+    if state["install_fail"] == pid:
+        fail("Error during install: Cannot install platform: checksum mismatch in %s" % item)
+    print("Installing %s..." % tool)
+    sys.stdout.flush()
+    if state["install_slow"] == pid:
+        time.sleep(30)
+    print("Skipping tool configuration....")
+    print("%s installed" % tool)
+    print("Installing platform %s..." % item)
+    directory = platform_dir(pid, version)
+    os.makedirs(directory, exist_ok=True)
+    if p.get("post_install"):
+        with open(os.path.join(directory, "post_install.sh"), "w") as fp:
+            fp.write('#!/usr/bin/env bash\nif [ "$EUID" -ne 0 ]; then echo "Please run as root"; exit; fi\n'
+                     'echo "fake udev rules for %s"\n' % pid)
+    state["installed"][pid] = version
+    save_state(state)
+    print("Skipping platform configuration....")
+    print("Platform %s installed" % item)
+
+
+def main(argv):
+    global JSON
+    log_call(argv)
+    JSON = "--json" in argv
+    args = [a for a in argv if a != "--json"]
+    # drop global flags with values that Superduino might pass
+    while "--config-file" in args:
+        i = args.index("--config-file")
+        del args[i:i + 2]
+    state = load_state()
+    cmd = args[:2]
+
+    if args[:1] == ["version"]:
+        out({"Application": "arduino-cli", "VersionString": state["version"], "Commit": "fake",
+             "Status": "", "Date": "2026-01-01T00:00:00Z"})
+    elif cmd == ["config", "get"]:
+        key = args[2]
+        values = {"directories.user": user_dir(), "directories.data": data_dir(),
+                  "board_manager.additional_urls": state["additional_urls"]}
+        if key not in values:
+            fail("Cannot get the configuration key %s: key not found" % key)
+        out(values[key])
+    elif cmd == ["config", "add"] and args[2] == "board_manager.additional_urls":
+        for url in args[3:]:
+            if url not in state["additional_urls"]:
+                state["additional_urls"].append(url)
+        save_state(state)
+    elif cmd == ["config", "remove"] and args[2] == "board_manager.additional_urls":
+        state["additional_urls"] = [u for u in state["additional_urls"] if u not in args[3:]]
+        save_state(state)
+    elif cmd == ["core", "update-index"]:
+        update_index(state)
+    elif cmd == ["core", "search"]:
+        if not state["has_index"]:
+            if state["offline"]:
+                update_index(state)  # fails like the real one
+            state["has_index"] = True
+            save_state(state)
+        out({"platforms": [platform_json(state, pid, p) for pid, p in all_platforms(state).items()]})
+    elif cmd == ["core", "list"]:
+        platforms = all_platforms(state)
+        out({"platforms": [platform_json(state, pid, platforms[pid])
+                           for pid in state["installed"] if pid in platforms]})
+    elif cmd == ["board", "listall"]:
+        platforms = all_platforms(state)
+        boards = []
+        for pid, version in state["installed"].items():
+            p = platforms.get(pid)
+            if not p:
+                continue
+            for name, fqbn in p["boards"]:
+                boards.append({"name": name, "fqbn": fqbn, "platform": {
+                    "metadata": {"id": pid, "maintainer": p["maintainer"], "indexed": True},
+                    "release": {"name": p["name"], "version": version, "installed": True}}})
+        out({"boards": boards} if boards else {})
+    elif cmd == ["core", "install"]:
+        core_install(state, args[2])
+    elif cmd == ["core", "uninstall"]:
+        pid = args[2]
+        if pid not in state["installed"]:
+            fail("Error during uninstall: Platform '%s' is not installed" % pid)
+        del state["installed"][pid]
+        save_state(state)
+        print("Platform %s uninstalled" % pid)
+    elif cmd == ["sketch", "new"]:
+        path = args[2]
+        name = os.path.basename(path.rstrip("/"))
+        ino = os.path.join(path, name + ".ino")
+        if os.path.exists(ino):
+            fail("Error creating sketch: Can't create sketch: .ino file already exists")
+        os.makedirs(path, exist_ok=True)  # like the real one, parents are created silently
+        with open(ino, "w") as fp:
+            fp.write("\nvoid setup() {\n}\n\nvoid loop() {\n}\n")
+        out({"sketch_path": path})
+    elif cmd == ["profile", "create"]:
+        profile = args[args.index("--profile") + 1]
+        fqbn = args[args.index("--fqbn") + 1]
+        path = args[-1]
+        pid = ":".join(fqbn.split(":")[:2])
+        version = state["installed"].get(pid)
+        if not version:
+            fail("Error initializing the project file: Platform '%s' not found: platform not installed" % pid)
+        with open(os.path.join(path, "sketch.yaml"), "w") as fp:
+            fp.write("profiles:\n  %s:\n    fqbn: %s\n    platforms:\n      - platform: %s (%s)\n\n"
+                     "default_profile: %s\n" % (profile, fqbn, pid, version, profile))
+        out({"project_path": os.path.join(path, "sketch.yaml")})
+    elif cmd == ["lib", "examples"]:
+        fqbn = args[args.index("--fqbn") + 1] if "--fqbn" in args else ""
+        pid = ":".join(fqbn.split(":")[:2])
+        examples = []
+        for ex in state["examples"].get(pid, []):
+            lib_dir = os.path.join(data_dir(), "packages", "fake-libraries", ex["library"])
+            ex_dir = os.path.join(lib_dir, "examples", ex["name"])
+            os.makedirs(ex_dir, exist_ok=True)
+            for fname, content in ex["files"].items():
+                with open(os.path.join(ex_dir, fname), "w") as fp:
+                    fp.write(content)
+            examples.append({"library": {"name": ex["library"], "install_dir": lib_dir,
+                                         "source_dir": os.path.join(lib_dir, "src"), "location": "platform"},
+                             "examples": [ex_dir]})
+        out({"examples": examples})
+    else:
+        fail("fake arduino-cli: unsupported command: " + " ".join(argv))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Stand-in for pkexec used by the Superduino testbench. It records the command
+# and behaves according to $SUPERDUINO_TEST_DIR/pkexec-mode:
+#   ok (default) - pretend the command ran as root
+#   cancel       - pretend the password dialog was dismissed (exit 126)
+#   fail         - pretend the command failed
+echo "$*" >> "$SUPERDUINO_TEST_DIR/pkexec-calls.log"
+mode=$(cat "$SUPERDUINO_TEST_DIR/pkexec-mode" 2>/dev/null)
+case "$mode" in
+  cancel) exit 126 ;;
+  fail) echo "Error: something broke"; exit 1 ;;
+  *) echo "Reload rules..."; exit 0 ;;
+esac
