@@ -46,6 +46,36 @@ function EmptyView:get_filename()
 end
 
 
+---Shortens a path to fit in max_w by replacing middle folders with an ellipsis,
+---keeping the first component and as many trailing folders as fit.
+local function shorten_path(font, path, max_w)
+  if font:get_width(path) <= max_w then return path end
+  local ellipsis = "\u{2026}"
+  local head = path:match("^[/\\]?[^/\\]*")
+  local sep = path:match("[/\\]") or PATHSEP
+  local parts = {}
+  for part in path:sub(#head + 1):gmatch("[^/\\]+") do table.insert(parts, part) end
+  local best, suffix = nil, ""
+  for i = #parts, 1, -1 do
+    suffix = sep .. parts[i] .. suffix
+    local text = head .. sep .. ellipsis .. suffix
+    if font:get_width(text) > max_w then break end
+    best = text
+  end
+  if best then return best end
+  -- not even the last folder fits after the head: trim characters from the left,
+  -- starting only at UTF-8 character boundaries
+  for i = 2, #path do
+    local byte = path:byte(i)
+    if byte < 0x80 or byte >= 0xC0 then
+      local text = ellipsis .. path:sub(i)
+      if font:get_width(text) <= max_w then return text end
+    end
+  end
+  return ellipsis
+end
+
+
 local function format_binding(binding)
   return (binding:gsub("[^+]+", function(key)
     return key:sub(1, 1):upper() .. key:sub(2)
@@ -204,7 +234,9 @@ function EmptyView:draw_item(item)
     if item.detail_align == "right" then
       common.draw_text(style.font, style.dim, item.detail, "right", x, item.y, w - style.padding.x, item.h)
     else
-      common.draw_text(style.font, style.dim, item.detail, "left", label_end + style.padding.x, item.y, 0, item.h)
+      local detail_x = label_end + style.padding.x
+      local detail = shorten_path(style.font, item.detail, x + w - style.padding.x - detail_x)
+      common.draw_text(style.font, style.dim, detail, "left", detail_x, item.y, 0, item.h)
     end
   end
   core.pop_clip_rect()
