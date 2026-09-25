@@ -6,11 +6,46 @@ local keymap = require "core.keymap"
 local View = require "core.view"
 
 ---Welcome screen shown in nodes without any open document.
+---
+---The screen is made of sections (see `EmptyView.add_section`), each with a
+---title and a list of rows. Plugins can add their own sections.
 ---@class core.emptyview : core.view
 ---@field super core.view
 local EmptyView = View:extend()
 
 function EmptyView:__tostring() return "EmptyView" end
+
+---A row on the welcome screen.
+---@class core.emptyview.item
+---@field id string Unique and stable across frames; used to track hovering.
+---@field label string
+---@field detail? string Secondary text.
+---@field detail_align? "left"|"right" "right" aligns the detail to the right edge (e.g. shortcuts), "left" puts it after the label, shortening it like a path when too long.
+---@field color? renderer.color Label color; defaults to `style.accent` for clickable rows and `style.text` otherwise.
+---@field run? fun() Called when the row is clicked; rows without it are not clickable.
+
+---A section of the welcome screen.
+---@class core.emptyview.section
+---@field id string
+---@field title string
+---@field order number Sections are shown by ascending order.
+---@field get_items fun(view: core.emptyview): core.emptyview.item[]
+---@field fill? boolean Show only as many rows as fit in the remaining space.
+---@field empty_text? string Shown when the section has no rows.
+
+---@type core.emptyview.section[]
+EmptyView.sections = {}
+
+---Adds a section to the welcome screen, replacing any section with the same id.
+---@param section core.emptyview.section
+function EmptyView.add_section(section)
+  for i, other in ipairs(EmptyView.sections) do
+    if other.id == section.id then table.remove(EmptyView.sections, i) break end
+  end
+  table.insert(EmptyView.sections, section)
+  table.sort(EmptyView.sections, function(a, b) return a.order < b.order end)
+  core.redraw = true
+end
 
 ---Actions listed under "Start"; hidden when the command is not currently valid.
 EmptyView.actions = {
@@ -116,59 +151,57 @@ function EmptyView:layout()
   local header_h = font:get_height() + pad_y
   local section_gap = pad_y * 2
 
-  local actions = {}
-  for _, action in ipairs(self.actions) do
-    if command.is_valid(action.cmd) then table.insert(actions, action) end
+  -- gather rows and measure everything except the rows of "fill" sections
+  local sections = {}
+  local fixed_h = title_h
+  local fill_count = 0
+  for _, section in ipairs(self.sections) do
+    local rows = section.get_items(self) or {}
+    table.insert(sections, { section = section, rows = rows })
+    fixed_h = fixed_h + section_gap + header_h
+    if section.fill then
+      fill_count = fill_count + 1
+    elseif #rows > 0 or section.empty_text then
+      fixed_h = fixed_h + math.max(#rows, 1) * row_h
+    end
   end
 
-  -- drop recent folders that do not fit in the view
-  local fixed_h = title_h + section_gap + header_h + #actions * row_h + section_gap + header_h
-  local max_rows = math.max(1, math.floor((self.size.y - fixed_h - pad_y * 2) / row_h))
-  local recent_count = math.min(#self.recents, max_rows)
-  local content_h = fixed_h + math.max(recent_count, 1) * row_h
+  -- "fill" sections share the remaining space, keeping at least one row each
+  local free_rows = math.floor((self.size.y - fixed_h - pad_y * 2) / row_h)
+  local fill_rows = fill_count > 0 and math.max(1, math.floor(free_rows / fill_count)) or 0
+  local content_h = fixed_h
+  for _, s in ipairs(sections) do
+    if s.section.fill then
+      while #s.rows > fill_rows do table.remove(s.rows) end
+      if #s.rows > 0 or s.section.empty_text then
+        content_h = content_h + math.max(#s.rows, 1) * row_h
+      end
+    end
+  end
 
   local w = math.min(self.size.x - pad_x * 4, math.floor(560 * SCALE))
   local x = self.position.x + math.floor((self.size.x - w) / 2)
   local y = self.position.y + math.max(pad_y, math.floor((self.size.y - content_h) / 2))
 
-  local layout = { x = x, w = w, row_h = row_h }
+  local layout = { x = x, w = w, row_h = row_h, header_h = header_h, headers = {}, notes = {}, items = {} }
   layout.title_y = y
-  y = y + title_h + section_gap
+  y = y + title_h
 
-  layout.start_y = y
-  y = y + header_h
-  local items = {}
-  for _, action in ipairs(actions) do
-    local binding = keymap.get_binding(action.cmd)
-    table.insert(items, {
-      id = "action:" .. action.cmd,
-      x = x, y = y, w = w, h = row_h,
-      label = action.label,
-      detail = binding and format_binding(binding),
-      detail_align = "right",
-      run = function() command.perform(action.cmd) end,
-    })
-    y = y + row_h
-  end
-  y = y + section_gap
-
-  layout.recent_y = y
-  y = y + header_h
-  layout.no_recents_y = recent_count == 0 and y or nil
-  for i = 1, recent_count do
-    local path = self.recents[i]
-    table.insert(items, {
-      id = "recent:" .. path,
-      x = x, y = y, w = w, h = row_h,
-      label = common.basename(path),
-      detail = common.home_encode(common.dirname(path) or path),
-      detail_align = "left",
-      run = function() open_folder(path) end,
-    })
-    y = y + row_h
+  for _, s in ipairs(sections) do
+    y = y + section_gap
+    table.insert(layout.headers, { text = s.section.title, y = y })
+    y = y + header_h
+    if #s.rows == 0 and s.section.empty_text then
+      table.insert(layout.notes, { text = s.section.empty_text, y = y })
+      y = y + row_h
+    end
+    for _, row in ipairs(s.rows) do
+      row.x, row.y, row.w, row.h = x, y, w, row_h
+      table.insert(layout.items, row)
+      y = y + row_h
+    end
   end
 
-  layout.items = items
   return layout
 end
 
@@ -183,7 +216,7 @@ end
 
 function EmptyView:get_item_at(x, y)
   for _, item in ipairs(self.items) do
-    if x >= item.x and x < item.x + item.w and y >= item.y and y < item.y + item.h then
+    if item.run and x >= item.x and x < item.x + item.w and y >= item.y and y < item.y + item.h then
       return item
     end
   end
@@ -229,7 +262,8 @@ function EmptyView:draw_item(item)
     renderer.draw_rect(x, item.y, w, item.h, style.line_highlight)
   end
   core.push_clip_rect(x, item.y, w - style.padding.x, item.h)
-  local label_end = common.draw_text(style.font, style.accent, item.label, "left", text_x, item.y, 0, item.h)
+  local color = item.color or (item.run and style.accent or style.text)
+  local label_end = common.draw_text(style.font, color, item.label, "left", text_x, item.y, 0, item.h)
   if item.detail then
     if item.detail_align == "right" then
       common.draw_text(style.font, style.dim, item.detail, "right", x, item.y, w - style.padding.x, item.h)
@@ -254,16 +288,60 @@ function EmptyView:draw()
   common.draw_text(style.font, style.dim, VERSION, "left",
     title_end + style.padding.x, layout.title_y, 0, style.big_font:get_height())
 
-  common.draw_text(style.font, style.dim, "Start", "left", x, layout.start_y, w, header_h)
-  common.draw_text(style.font, style.dim, "Recent", "left", x, layout.recent_y, w, header_h)
-  if layout.no_recents_y then
-    common.draw_text(style.font, style.dim, "No recent folders", "left",
-      x + style.padding.x, layout.no_recents_y, w, layout.row_h)
+  for _, header in ipairs(layout.headers) do
+    common.draw_text(style.font, style.dim, header.text, "left", x, header.y, w, layout.header_h)
+  end
+  for _, note in ipairs(layout.notes) do
+    common.draw_text(style.font, style.dim, note.text, "left", x + style.padding.x, note.y, w, layout.row_h)
   end
 
   for _, item in ipairs(layout.items) do
     self:draw_item(item)
   end
 end
+
+
+EmptyView.add_section({
+  id = "start",
+  title = "Start",
+  order = 10,
+  get_items = function()
+    local items = {}
+    for _, action in ipairs(EmptyView.actions) do
+      if command.is_valid(action.cmd) then
+        local binding = keymap.get_binding(action.cmd)
+        table.insert(items, {
+          id = "action:" .. action.cmd,
+          label = action.label,
+          detail = binding and format_binding(binding),
+          detail_align = "right",
+          run = function() command.perform(action.cmd) end,
+        })
+      end
+    end
+    return items
+  end,
+})
+
+EmptyView.add_section({
+  id = "recent",
+  title = "Recent",
+  order = 100,
+  fill = true,
+  empty_text = "No recent folders",
+  get_items = function(view)
+    local items = {}
+    for _, path in ipairs(view.recents) do
+      table.insert(items, {
+        id = "recent:" .. path,
+        label = common.basename(path),
+        detail = common.home_encode(common.dirname(path) or path),
+        detail_align = "left",
+        run = function() open_folder(path) end,
+      })
+    end
+    return items
+  end,
+})
 
 return EmptyView
