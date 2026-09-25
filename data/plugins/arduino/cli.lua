@@ -142,16 +142,23 @@ end
 ---@param args string[]
 ---@param options? { path?: string, timeout?: number }
 ---@return any? result Decoded output when the command succeeded.
----@return string? error Message explaining the failure otherwise.
+---@return string? error Message explaining the failure otherwise; arduino-cli's
+---warnings are appended since they often hold the actual cause.
 function cli.run_json(args, options)
   local json_args = { table.unpack(args) }
   table.insert(json_args, "--json")
   local stdout, stderr, exit_code = cli.run(json_args, options)
   if not stdout then return nil, stderr end
+  -- some commands (e.g. `config add`) print nothing when they succeed
+  if exit_code == 0 and not stdout:find("%S") then return {} end
   local result = json.decode(stdout)
   if exit_code == 0 and result ~= nil then return result end
   if type(result) == "table" and type(result.error) == "string" then
-    return nil, result.error
+    local message = result.error
+    if type(result.warnings) == "table" and #result.warnings > 0 then
+      message = message .. "\n" .. table.concat(result.warnings, "\n")
+    end
+    return nil, message
   end
   local message = (stderr ~= "" and stderr or stdout):gsub("%s+$", ""):match("[^\n]*$")
   return nil, (message ~= "" and message) or ("exited with code " .. tostring(exit_code))
@@ -164,6 +171,33 @@ local function read_version(path)
   if not result then return nil, err end
   if type(result.VersionString) ~= "string" then return nil, "did not report a version" end
   return result.VersionString
+end
+
+
+-- Patterns in arduino-cli errors and what they mean, most specific first.
+local ERROR_EXPLANATIONS = {
+  { { "no such host", "network is unreachable", "connection refused", "i/o timeout", "dial tcp",
+      "tls handshake timeout", "context deadline exceeded", "proxyconnect", "connection reset" },
+    "Could not connect to the internet. Check your connection and try again." },
+  { { "404 not found" }, "The download address was not found (error 404). If you added a board index URL, check it." },
+  { { "checksum", "invalid archive", "unexpected eof" }, "A downloaded file was damaged. Try again." },
+  { { "no space left" }, "There is not enough free disk space." },
+  { { "permission denied" }, "Permission denied while writing files. Check the permissions of the arduino-cli folders." },
+}
+
+---Explains an arduino-cli error in plain words, when it is a known kind.
+---The original text should still be shown as details.
+---@param text string
+---@return string? explanation
+---@return boolean is_network True for connection problems.
+function cli.explain_error(text)
+  local lower = tostring(text):lower()
+  for i, entry in ipairs(ERROR_EXPLANATIONS) do
+    for _, pattern in ipairs(entry[1]) do
+      if lower:find(pattern, 1, true) then return entry[2], i == 1 end
+    end
+  end
+  return nil, false
 end
 
 
