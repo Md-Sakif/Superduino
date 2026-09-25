@@ -24,6 +24,8 @@ local CHECK_TIMEOUT = 15
 ---Configured location of the executable, if any.
 ---@type string?
 cli.path = nil
+---Whether `cli.path` is the copy Superduino downloaded and manages itself.
+cli.managed = false
 ---@type arduino.cli.status
 cli.status = "checking"
 ---Version reported by the executable when `status` is "ok".
@@ -239,9 +241,10 @@ end
 
 ---Uses the executable at `path` from now on, remembering it for future runs.
 ---@param path string
-function cli.set_path(path)
-  cli.path = path
-  storage.save(STORAGE_MODULE, STORAGE_KEY, { path = path })
+---@param managed? boolean True for the copy Superduino downloaded itself.
+function cli.set_path(path, managed)
+  cli.path, cli.managed = path, managed == true
+  storage.save(STORAGE_MODULE, STORAGE_KEY, { path = path, managed = cli.managed })
   cli.check()
 end
 
@@ -263,7 +266,7 @@ end
 function cli.init()
   local saved = storage.load(STORAGE_MODULE, STORAGE_KEY)
   if type(saved) == "table" and type(saved.path) == "string" then
-    cli.path = saved.path
+    cli.path, cli.managed = saved.path, saved.managed == true
     cli.check()
   else
     cli.search()

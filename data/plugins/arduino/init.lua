@@ -9,6 +9,7 @@ local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
 local NewProjectView = require "plugins.arduino.newprojectview"
 local access = require "plugins.arduino.access"
+local managed = require "plugins.arduino.managed_cli"
 require "plugins.arduino.access_ui"
 
 
@@ -86,6 +87,15 @@ command.add(nil, {
   ["arduino:open-cli-install-guide"] = function()
     open_url(cli.INSTALL_URL)
   end,
+
+  ["arduino:download-cli"] = function()
+    managed.download()
+  end,
+
+})
+
+command.add(function() return managed.busy() end, {
+  ["arduino:cancel-cli-download"] = function() managed.cancel() end,
 })
 
 
@@ -97,34 +107,77 @@ local function action(id, label, cmd)
 end
 
 
+-- Rows describing a running or failed download of the managed arduino-cli.
+local function download_rows()
+  local s = managed.status
+  if s.state == "idle" then return {} end
+  if s.state == "failed" then
+    local explanation = cli.explain_error((s.error or "") .. " " .. (s.details or ""))
+    return {
+      { id = "cli:download", label = "Download failed", color = style.error,
+        detail = (explanation or s.error or "") .. (s.details and ("  Details: " .. s.details) or ""), detail_align = "text" },
+      action("cli:download-again", "Try Again", "arduino:download-cli"),
+    }
+  end
+  local text = ({ checking = "Finding the latest arduino-cli...", verifying = "Checking the download...",
+    installing = "Installing arduino-cli " .. tostring(s.version) .. "..." })[s.state]
+  if s.state == "downloading" then
+    text = "Downloading arduino-cli " .. tostring(s.version) .. "..."
+    if s.total and s.total > 0 then
+      local detail = string.format("%.0f%%  (%.1f of %.1f MB)", 100 * (s.done or 0) / s.total,
+        (s.done or 0) / 1e6, s.total / 1e6)
+      return {
+        { id = "cli:download", label = text, color = style.accent, detail = detail, detail_align = "text" },
+        action("cli:cancel", "Cancel Download", "arduino:cancel-cli-download"),
+      }
+    end
+  end
+  return {
+    { id = "cli:download", label = text, color = style.accent },
+    action("cli:cancel", "Cancel Download", "arduino:cancel-cli-download"),
+  }
+end
+
+
 EmptyView.add_section({
   id = "arduino-cli",
   title = "Arduino CLI",
   order = 50,
   get_items = function()
+    local items = {}
     local path = cli.path and common.home_encode(cli.path)
     if cli.status == "checking" then
-      return {
-        { id = "cli:status", label = "Checking arduino-cli...", color = style.dim, detail = path, detail_align = "left" },
-      }
+      table.insert(items, { id = "cli:status", label = "Checking arduino-cli...", color = style.dim, detail = path,
+        detail_align = "left" })
     elseif cli.status == "ok" then
-      return {
-        { id = "cli:status", label = "arduino-cli " .. cli.version, color = style.good, detail = path, detail_align = "left" },
-        action("cli:locate", "Change Location...", "arduino:locate-cli"),
-      }
-    end
-    local items = {}
-    if cli.status == "missing" then
+      table.insert(items, { id = "cli:status", label = "arduino-cli " .. cli.version, color = style.good,
+        detail = (cli.managed and "managed by Superduino: " or "") .. path, detail_align = "left" })
+    elseif cli.status == "missing" then
       table.insert(items, { id = "cli:status", label = "Not found at", color = style.error, detail = path, detail_align = "left" })
     elseif cli.status == "broken" then
       table.insert(items, { id = "cli:status", label = "Not working", color = style.error, detail = path, detail_align = "left" })
     else
       table.insert(items, { id = "cli:status", label = "Not installed", color = style.warn,
-        detail = "arduino-cli was not found on this computer", detail_align = "left" })
+        detail = "Superduino needs arduino-cli to work with boards", detail_align = "text" })
     end
-    table.insert(items, action("cli:locate", "Locate arduino-cli...", "arduino:locate-cli"))
-    table.insert(items, action("cli:search", "Search Again", "arduino:search-cli"))
-    if cli.status == "not_found" then
+
+    local downloading = download_rows()
+    for _, row in ipairs(downloading) do table.insert(items, row) end
+    if managed.busy() or cli.status == "checking" then return items end
+
+    -- both ways are always offered: Superduino manages arduino-cli, or the user points to their own
+    if cli.status == "ok" and cli.managed then
+      table.insert(items, action("cli:update", "Update arduino-cli", "arduino:download-cli"))
+      table.insert(items, action("cli:locate", "Use My Own arduino-cli...", "arduino:locate-cli"))
+    elseif cli.status == "ok" then
+      table.insert(items, action("cli:locate", "Change Location...", "arduino:locate-cli"))
+      table.insert(items, action("cli:manage", "Let Superduino Manage arduino-cli", "arduino:download-cli"))
+    else
+      if #downloading == 0 then
+        table.insert(items, action("cli:manage", "Download arduino-cli for Me", "arduino:download-cli"))
+      end
+      table.insert(items, action("cli:locate", "Locate My Own arduino-cli...", "arduino:locate-cli"))
+      table.insert(items, action("cli:search", "Search Again", "arduino:search-cli"))
       table.insert(items, action("cli:install", "Installation Guide", "arduino:open-cli-install-guide"))
     end
     return items
