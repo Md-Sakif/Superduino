@@ -111,6 +111,10 @@ local function shorten_path(font, path, max_w)
 end
 
 
+---Shortens a path to fit in `max_w` pixels, replacing middle folders with an ellipsis.
+EmptyView.shorten_path = shorten_path
+
+
 local function format_binding(binding)
   return (binding:gsub("[^+]+", function(key)
     return key:sub(1, 1):upper() .. key:sub(2)

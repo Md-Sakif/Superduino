@@ -7,6 +7,7 @@ local style = require "core.style"
 local EmptyView = require "core.emptyview"
 local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
+local NewProjectView = require "plugins.arduino.newprojectview"
 
 
 local function open_url(url)
@@ -60,7 +61,11 @@ end
 
 command.add(nil, {
   ["arduino:new-project"] = function()
-    project.new()
+    if cli.status ~= "ok" then
+      core.error("arduino-cli is not available; see the Arduino CLI section on the welcome screen")
+      return
+    end
+    NewProjectView.open()
   end,
 
   ["arduino:locate-cli"] = function()
