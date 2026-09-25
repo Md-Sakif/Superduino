@@ -173,6 +173,7 @@ function EmptyView:layout()
   local fill_count = 0
   for _, section in ipairs(self.sections) do
     local rows = section.get_items(self) or {}
+    if #rows == 0 and not section.empty_text and not section.fill then goto continue end
     table.insert(sections, { section = section, rows = rows })
     fixed_h = fixed_h + section_gap + header_h
     if section.fill then
@@ -180,6 +181,7 @@ function EmptyView:layout()
     elseif #rows > 0 or section.empty_text then
       fixed_h = fixed_h + math.max(#rows, 1) * row_h
     end
+    ::continue::
   end
 
   -- "fill" sections share the remaining space, keeping at least one row each

@@ -92,6 +92,24 @@ command.add(nil, {
     managed.download()
   end,
 
+  ["arduino:repair-platform"] = function()
+    local broken = project.incomplete_installs()
+    if #broken == 0 then
+      core.log("No board families need repairing")
+    elseif #broken == 1 then
+      NewProjectView.open({ repair = broken[1].id })
+    else
+      local items = {}
+      for _, b in ipairs(broken) do
+        table.insert(items, setmetatable({ text = b.name, info = b.id },
+          { __tostring = function(i) return i.text .. " " .. i.info end, __lt = function(a, c) return a.text < c.text end }))
+      end
+      core.command_view:enter("Repair Board Family", {
+        submit = function(_, item) if item then NewProjectView.open({ repair = item.info }) end end,
+        suggest = function(text) return common.fuzzy_match(items, text) end,
+      })
+    end
+  end,
 })
 
 command.add(function() return managed.busy() end, {
@@ -104,6 +122,11 @@ table.insert(EmptyView.actions, 1, { label = "Create New Project...", cmd = "ard
 
 local function action(id, label, cmd)
   return { id = id, label = label, run = function() command.perform(cmd) end }
+end
+
+
+local function run(id, label, fn)
+  return { id = id, label = label, run = fn }
 end
 
 
@@ -179,6 +202,24 @@ EmptyView.add_section({
       table.insert(items, action("cli:locate", "Locate My Own arduino-cli...", "arduino:locate-cli"))
       table.insert(items, action("cli:search", "Search Again", "arduino:search-cli"))
       table.insert(items, action("cli:install", "Installation Guide", "arduino:open-cli-install-guide"))
+    end
+    return items
+  end,
+})
+
+
+-- Only shown when something needs fixing.
+EmptyView.add_section({
+  id = "arduino-attention",
+  title = "Needs Attention",
+  order = 45,
+  get_items = function()
+    local items = {}
+    for _, broken in ipairs(project.incomplete_installs()) do
+      table.insert(items, { id = "attention:" .. broken.id, label = broken.name .. " is only half installed",
+        color = style.error, detail = "its boards will not work until it is repaired", detail_align = "text" })
+      table.insert(items, run("attention:repair:" .. broken.id, "Repair " .. broken.name .. "...",
+        function() NewProjectView.open({ repair = broken.id }) end))
     end
     return items
   end,

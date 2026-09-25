@@ -149,23 +149,85 @@ local function parse_install_line(line)
 end
 
 
+-------------------------------------------------------------------------------
+-- Tracking installs, so that an interrupted one can be repaired
+-------------------------------------------------------------------------------
+
+local INSTALLS_KEY = "installs"
+
+---Platforms whose installation did not finish, keyed by platform id:
+---{ name, state = "installing"|"incomplete" }. "installing" means an install is
+---running now, or the editor stopped while installing (treated as incomplete).
+local install_records_cache
+function project.install_records()
+  if not install_records_cache then
+    local records = storage.load(STORAGE_MODULE, INSTALLS_KEY)
+    install_records_cache = type(records) == "table" and records or {}
+  end
+  return install_records_cache
+end
+
+
+local function set_install_record(id, record)
+  local records = project.install_records()
+  records[id] = record
+  storage.save(STORAGE_MODULE, INSTALLS_KEY, records)
+  core.redraw = true
+end
+
+
+-- installs running in this session, so they are not mistaken for interrupted ones
+local running_installs = {}
+
+---Platforms left half installed (by a cancel during the install phase, a failure
+---there, or the editor stopping mid-install), as a list of { id, name }.
+function project.incomplete_installs()
+  local list = {}
+  for id, record in pairs(project.install_records()) do
+    if record.state == "incomplete" or (record.state == "installing" and not running_installs[id]) then
+      table.insert(list, { id = id, name = record.name or id })
+    end
+  end
+  table.sort(list, function(a, b) return a.name < b.name end)
+  return list
+end
+
+
 ---Installs a platform with `arduino-cli core install`, reporting progress.
 ---Set `handle.cancelled = true` to stop it; the process is then killed.
+---After it returns, `handle.phase` is "download" or "install" (the phase it
+---reached) and `handle.details` holds arduino-cli's full error output.
 ---Must be called from a thread (see `core.add_thread`).
 ---@param id string Platform id, e.g. "arduino:esp32".
----@param handle table Receives `proc`; checked for `cancelled`.
+---@param handle table Receives `proc`; checked for `cancelled`. `handle.name` names the platform in records.
 ---@param on_event fun(event: arduino.install_event)
 ---@return boolean installed
 ---@return string? error "cancelled" when cancelled
 function project.install_platform(id, handle, on_event)
   local proc, err = cli.start({ "core", "install", id })
   if not proc then return false, err end
-  handle.proc = proc
+  handle.proc, handle.phase = proc, "download"
+  running_installs[id] = true
+  set_install_record(id, { name = handle.name or id, state = "installing" })
+  -- only an interruption after files started being unpacked leaves a broken install
+  local function finish(ok, message)
+    running_installs[id] = nil
+    if ok or handle.phase == "download" then
+      set_install_record(id, nil)
+    else
+      set_install_record(id, { name = handle.name or id, state = "incomplete" })
+    end
+    return ok, message
+  end
+  local function handle_event(event)
+    if event.kind == "installing" then handle.phase = "install" end
+    on_event(event)
+  end
   local buffer, errors = "", {}
   while true do
     if handle.cancelled then
       proc:kill()
-      return false, "cancelled"
+      return finish(false, "cancelled")
     end
     local running = proc:running()
     local out = proc:read_stdout(4096)
@@ -179,11 +241,11 @@ function project.install_platform(id, handle, on_event)
         if not s then break end
         local event = parse_install_line(buffer:sub(1, s - 1))
         buffer = buffer:sub(e + 1)
-        if event then on_event(event) end
+        if event then handle_event(event) end
       end
       -- the latest progress update is not terminated until the next one arrives
       local partial = parse_install_line(buffer)
-      if partial and partial.kind == "progress" then on_event(partial) end
+      if partial and partial.kind == "progress" then handle_event(partial) end
     elseif not running then
       break
     else
@@ -192,13 +254,25 @@ function project.install_platform(id, handle, on_event)
   end
   if buffer ~= "" then
     local event = parse_install_line(buffer)
-    if event then on_event(event) end
+    if event then handle_event(event) end
   end
   if proc:returncode() ~= 0 then
-    local message = table.concat(errors):gsub("%s+$", ""):match("[^\n]*$")
-    return false, (message ~= "" and message) or ("arduino-cli exited with code " .. tostring(proc:returncode()))
+    handle.details = table.concat(errors):gsub("%s+$", "")
+    local message = handle.details:match("[^\n]*$")
+    return finish(false, (message ~= "" and message) or ("arduino-cli exited with code " .. tostring(proc:returncode())))
   end
-  return true
+  return finish(true)
+end
+
+
+---Repairs a half installed platform: uninstalls what is there, then installs it again.
+---Same arguments and results as `project.install_platform`.
+function project.repair_platform(id, handle, on_event)
+  on_event({ kind = "message", text = "Removing the incomplete installation..." })
+  -- fails harmlessly when nothing was registered as installed yet
+  cli.run({ "core", "uninstall", id })
+  if handle.cancelled then return false, "cancelled" end
+  return project.install_platform(id, handle, on_event)
 end
 
 
@@ -236,7 +310,13 @@ function project.name_problem(name)
 end
 
 
+-------------------------------------------------------------------------------
+-- Creating projects
+-------------------------------------------------------------------------------
+
 ---Creates the sketch at `path` with a default build profile for `board`.
+---The parent folder must exist:
+---arduino-cli would silently create missing folders.
 ---Must be called from a thread (see `core.add_thread`).
 ---@param path string
 ---@param board arduino.board
@@ -244,6 +324,11 @@ end
 ---@return string? error
 function project.create(path, board)
   local name = common.basename(path)
+  local parent = common.dirname(path)
+  local parent_info = parent and system.get_file_info(parent)
+  if not parent_info or parent_info.type ~= "dir" then
+    return false, "the folder " .. tostring(parent) .. " does not exist"
+  end
   local _, err = cli.run_json({ "sketch", "new", path })
   if err then return false, err end
   local profile = project.profile_name(board.fqbn)

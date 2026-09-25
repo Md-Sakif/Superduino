@@ -1,4 +1,6 @@
 -- Step-by-step "New Project" page: vendor, architecture, board, then a name.
+-- Panels (install/repair) temporarily replace the list or name area; see
+-- install_panel.lua.
 local core = require "core"
 local common = require "core.common"
 local command = require "core.command"
@@ -7,8 +9,10 @@ local keymap = require "core.keymap"
 local style = require "core.style"
 local View = require "core.view"
 local EmptyView = require "core.emptyview"
+local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
-local access = require "plugins.arduino.access"
+local ui = require "plugins.arduino.ui"
+local InstallPanel = require "plugins.arduino.install_panel"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -60,10 +64,9 @@ function NewProjectView:new()
   self.location = nil
   self.boards = nil
   self.platforms = {}
-  -- platform installation offered or in progress:
-  -- { platform, state = "confirm"|"running"|"failed", handle, progress, done = {}, error }
-  self.install = nil
+  self.panel = nil -- e.g. InstallPanel
   self.loading = true
+  self.load_error = nil
   self.message = nil
   self.message_is_error = false
   self.creating = false
@@ -79,21 +82,24 @@ end
 
 
 function NewProjectView:supports_text_input()
-  return not self.creating and not self.install
+  if self.creating then return false end
+  if self.panel then return self.panel.wants_text ~= nil and self.panel:wants_text() end
+  return true
 end
 
 
 function NewProjectView:try_close(do_close)
-  if self.install and self.install.state == "running" then
-    self.install.handle.cancelled = true
-    core.log("Cancelled installing %s", self.install.platform.name)
-  end
+  if self.panel and self.panel.on_close then self.panel:on_close() end
   if open_view == self then open_view = nil end
   NewProjectView.super.try_close(self, do_close)
 end
 
 
--- Loads installed boards and all known platforms. Must be called from a thread.
+-------------------------------------------------------------------------------
+-- Data
+-------------------------------------------------------------------------------
+
+---Loads installed boards and all known platforms. Must be called from a thread.
 function NewProjectView:load_data()
   local boards, err = project.load_boards()
   local platforms, platforms_err = project.load_platforms()
@@ -101,25 +107,28 @@ function NewProjectView:load_data()
     -- still usable with the installed boards, e.g. when offline without an index
     core.warn("Could not load the list of installable boards: %s", tostring(platforms_err))
   end
-  if not boards and not platforms then
-    return false, "Could not load the list of boards: " .. tostring(err)
+  if (not boards or #boards == 0) and not platforms then
+    return false, platforms_err or err
   end
   self.boards, self.platforms = boards or {}, platforms or {}
   self.list_key = nil
+  core.redraw = true
   return true
 end
 
 
 function NewProjectView:load()
-  self.loading = true
+  self.loading, self.load_error = true, nil
+  self.message = nil
+  core.redraw = true
   core.add_thread(function()
     local ok, err = self:load_data()
-    self.location = project.sketchbook_dir()
+    self.location = self.location or project.sketchbook_dir()
     self.loading = false
     if not ok then
-      self:set_message(err, true)
+      self.load_error = err
     else
-      self:enter_step(1)
+      self:enter_step(self.step)
     end
     core.redraw = true
   end)
@@ -136,24 +145,13 @@ end
 -- Choices
 -------------------------------------------------------------------------------
 
--- "Arduino UNO, Arduino Nano and 25 more"
-local function examples(names)
-  if #names == 0 then return nil end
-  local shown = {}
-  for i = 1, math.min(3, #names) do shown[i] = names[i] end
-  local text = table.concat(shown, ", ")
-  if #names > 3 then text = text .. " and " .. (#names - 3) .. " more" end
-  return text
-end
-
-
 local function count_boards(n)
   return n == 1 and "1 board" or (n .. " boards")
 end
 
 
--- Families (platforms) of a vendor, installed or not, keyed by platform id:
--- { id, name, vendor, vendor_name, installed_version?, board_names, platform? }
+-- Families (platforms) of all vendors, installed or not:
+-- { id, name, vendor, vendor_name, installed_version?, board_names, platform?, incomplete? }
 function NewProjectView:get_families()
   local families, order = {}, {}
   for _, board in ipairs(self.boards or {}) do
@@ -176,6 +174,9 @@ function NewProjectView:get_families()
       families[platform.id] = family
       table.insert(order, family)
     end
+  end
+  for _, broken in ipairs(project.incomplete_installs()) do
+    if families[broken.id] then families[broken.id].incomplete = true end
   end
   return order
 end
@@ -208,12 +209,15 @@ function NewProjectView:get_step_items(step)
   elseif step == 2 then
     for _, family in ipairs(self:get_families()) do
       if family.vendor == self.choice[1] then
+        local detail = family.installed_version and ("installed " .. family.installed_version) or "not installed"
+        if family.incomplete then detail = "half installed - needs repair" end
         table.insert(items, {
           key = family.id,
           label = family.name,
-          note = examples(family.board_names),
-          detail = family.installed_version and ("installed " .. family.installed_version) or "not installed",
-          installed = family.installed_version ~= nil,
+          note = InstallPanel.examples(family.board_names),
+          detail = detail,
+          detail_color = family.incomplete and style.error or nil,
+          installed = family.installed_version ~= nil and not family.incomplete,
           family = family,
         })
       end
@@ -234,9 +238,9 @@ end
 
 
 -- Orders items for the typed text: exact id or name first, then names with a
--- word starting with the text, then any that contain it, then fuzzy matches.
--- Plain fuzzy matching alone would rank e.g. "Arduino BT" above "Arduino UNO"
--- for "uno", because the letters u-n-o also appear in "arduino".
+-- word starting with the text, then any that contain it. Fuzzy matches are only
+-- used when nothing else matches: plain fuzzy matching would rank e.g.
+-- "Arduino BT" above "Arduino UNO" for "uno" (u-n-o also appear in "arduino").
 local function filter_items(items, text)
   local needle = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
   if needle == "" then return items end
@@ -257,13 +261,12 @@ local function filter_items(items, text)
       if score then table.insert(fuzzy, { item = item, score = score }) end
     end
   end
-  table.sort(fuzzy, function(a, b) return a.score > b.score end)
   local result = {}
   for _, group in ipairs(groups) do
     for _, item in ipairs(group) do table.insert(result, item) end
   end
-  -- fuzzy matches are mostly noise next to real matches, so only use them as a fallback
   if #result == 0 then
+    table.sort(fuzzy, function(a, b) return a.score > b.score end)
     for _, entry in ipairs(fuzzy) do table.insert(result, entry.item) end
   end
   return result
@@ -315,7 +318,7 @@ end
 
 
 function NewProjectView:can_go_to(step)
-  if not self.boards or self.creating or self.install then return false end
+  if not self.boards or self.creating or self.panel then return false end
   for i = 1, step - 1 do
     if not self.choice[i] then return false end
   end
@@ -323,22 +326,50 @@ function NewProjectView:can_go_to(step)
 end
 
 
+function NewProjectView:open_panel(panel)
+  self.panel = panel
+  self.message = nil
+  core.redraw = true
+end
+
+
+---Closes the open panel, optionally showing a message on the page.
+function NewProjectView:close_panel(message, is_error)
+  self.panel = nil
+  self.message, self.message_is_error = message, is_error or false
+  self.list_key = nil
+  core.redraw = true
+end
+
+
+---Called by the install panel when a family was installed or repaired.
+function NewProjectView:finish_install(platform_id, message)
+  self.panel = nil
+  self.choice[2], self.choice[3] = platform_id, nil
+  self:enter_step(3)
+  self:set_message(message, false)
+end
+
+
 function NewProjectView:next()
-  if self.creating or not self.boards then return end
-  if self.step == NAME_STEP then
-    self:create()
+  if self.creating then return end
+  if self.panel then
+    self.panel:enter()
     return
   end
-  if self.install then
-    self:install_next()
+  if self.load_error then
+    self:load()
+    return
+  end
+  if not self.boards then return end
+  if self.step == NAME_STEP then
+    self:create()
     return
   end
   local item = self:get_list()[self.selected]
   if not item then return end
   if self.step == 2 and not item.installed then
-    self.install = { platform = item.family, state = "confirm" }
-    self.message = nil
-    core.redraw = true
+    self:open_panel(InstallPanel.new(self, item.family, item.family.incomplete and "repair" or "install"))
     return
   end
   if self.choice[self.step] ~= item.key then
@@ -352,8 +383,8 @@ end
 
 
 function NewProjectView:back()
-  if self.install then
-    self:install_back()
+  if self.panel then
+    self.panel:escape()
     return
   end
   if self.creating or self.step == 1 then return end
@@ -363,7 +394,11 @@ end
 
 
 function NewProjectView:move_selection(delta)
-  if self.step == NAME_STEP or self.install then return end
+  if self.panel then
+    if self.panel.move then self.panel:move(delta) end
+    return
+  end
+  if self.step == NAME_STEP then return end
   local count = #self:get_list()
   if count == 0 then return end
   self.selected = common.clamp(self.selected + delta, 1, count)
@@ -383,7 +418,11 @@ end
 
 
 function NewProjectView:type_text(text)
-  if self.creating or self.install then return end
+  if self.creating then return end
+  if self.panel then
+    if self.panel.text_input then self.panel:text_input(text) end
+    return
+  end
   text = text:gsub("[\r\n]", "")
   if self.step == NAME_STEP then
     self.name = self.name .. text
@@ -396,22 +435,17 @@ function NewProjectView:type_text(text)
 end
 
 
-local function remove_last_char(text)
-  return (text:gsub("[%z\1-\127\194-\244][\128-\191]*$", ""))
-end
-
-
 function NewProjectView:backspace()
   if self.creating then return end
-  if self.install then
-    self:back()
+  if self.panel then
+    self.panel:backspace()
     return
   end
   if self.step == NAME_STEP and self.name ~= "" then
-    self.name = remove_last_char(self.name)
+    self.name = ui.remove_last_char(self.name)
     self.message = nil
   elseif self.step < NAME_STEP and self.filter ~= "" then
-    self.filter = remove_last_char(self.filter)
+    self.filter = ui.remove_last_char(self.filter)
     self.selected, self.first_row = 1, 1
   else
     self:back()
@@ -421,7 +455,9 @@ end
 
 
 function NewProjectView:escape()
-  if self.step < NAME_STEP and self.filter ~= "" and not self.install then
+  if self.panel then
+    self.panel:escape()
+  elseif self.step < NAME_STEP and self.filter ~= "" then
     self.filter = ""
     self.selected, self.first_row = 1, 1
     core.redraw = true
@@ -431,8 +467,18 @@ function NewProjectView:escape()
 end
 
 
+-------------------------------------------------------------------------------
+-- Name step
+-------------------------------------------------------------------------------
+
 function NewProjectView:project_path()
   return self.location and (self.location .. PATHSEP .. self.name)
+end
+
+
+function NewProjectView:location_exists()
+  local info = self.location and system.get_file_info(self.location)
+  return info ~= nil and info.type == "dir"
 end
 
 
@@ -446,11 +492,23 @@ function NewProjectView:name_problem()
 end
 
 
+function NewProjectView:create_folder()
+  if not self.location or self:location_exists() then return end
+  local ok, err, path = common.mkdirp(self.location)
+  if ok then
+    self:set_message("Created the folder " .. common.home_encode(self.location) .. ".", false)
+  else
+    self:set_message("Could not create " .. tostring(path or self.location) .. ": " .. tostring(err), true)
+  end
+end
+
+
 function NewProjectView:change_location()
+  -- missing folders are accepted here; the page then offers to create them
   local function use(dir)
     local info = dir and system.get_file_info(dir)
-    if not info or info.type ~= "dir" then
-      self:set_message("Not a folder: " .. tostring(dir), true)
+    if info and info.type ~= "dir" then
+      self:set_message(common.home_encode(dir) .. " is a file, not a folder.", true)
       return
     end
     self.location = dir
@@ -466,7 +524,8 @@ function NewProjectView:change_location()
   core.command_view:enter("Create Project In", {
     text = self.location and (common.home_encode(self.location) .. PATHSEP) or "",
     submit = function(text)
-      use(system.absolute_path(common.home_expand(text)))
+      local dir = common.home_expand(text):gsub("[/\\]+$", "")
+      use(common.is_absolute_path(dir) and common.normalize_path(dir) or system.absolute_path(dir) or dir)
     end,
     suggest = function(text)
       return common.home_encode_list(common.dir_path_suggest(common.home_expand(text), self.location or HOME))
@@ -475,164 +534,12 @@ function NewProjectView:change_location()
 end
 
 
-function NewProjectView:start_install()
-  local install = self.install
-  install.state, install.error = "running", nil
-  self.message = nil
-  install.handle, install.progress, install.done, install.current = {}, nil, {}, "Starting..."
-  core.redraw = true
-  core.add_thread(function()
-    local ok, err = project.install_platform(install.platform.id, install.handle, function(event)
-      if event.kind == "progress" then
-        install.progress = event
-        install.current = "Downloading " .. event.item
-      elseif event.kind == "downloaded" then
-        install.progress = nil
-        table.insert(install.done, "Downloaded " .. event.item)
-      elseif event.kind == "installing" then
-        install.progress = nil
-        install.current = "Installing " .. event.item
-      elseif event.kind == "installed" then
-        table.insert(install.done, "Installed " .. event.item)
-      end
-      core.redraw = true
-    end)
-    if self.install ~= install then return end
-    if err == "cancelled" then
-      self.install = nil
-      self:set_message("Installation of " .. install.platform.name .. " was cancelled.", false)
-      return
-    end
-    if not ok then
-      install.state, install.error = "failed", err
-      core.redraw = true
-      return
-    end
-    install.current = "Loading the new boards..."
-    core.redraw = true
-    project.forget_cache()
-    local loaded, load_err = self:load_data()
-    if not loaded then
-      self.install = nil
-      self:set_message(load_err, true)
-      return
-    end
-    core.log("Installed %s", install.platform.name)
-    -- some families ship a script that installs USB permission rules (Linux only)
-    local version
-    for _, board in ipairs(self.boards) do
-      if board.arch == install.platform.id then version = board.version break end
-    end
-    local script = version and access.setup_script(install.platform.id, version)
-    if script and access.setup_record(install.platform.id, version) ~= "done" then
-      install.setup = { id = install.platform.id, name = install.platform.name, version = version, script = script }
-      install.state = "setup"
-      core.redraw = true
-      return
-    end
-    self:finish_install(install, "Installed " .. install.platform.name .. ". Now choose your board.")
-  end)
-end
-
-
-function NewProjectView:finish_install(install, message)
-  self.install = nil
-  self.choice[2], self.choice[3] = install.platform.id, nil
-  self:enter_step(3)
-  self:set_message(message, false)
-end
-
-
-function NewProjectView:start_setup()
-  local install = self.install
-  install.state, install.setup_output = "setup-running", nil
-  core.redraw = true
-  core.add_thread(function()
-    local result, output = access.run_setup(install.setup)
-    if self.install ~= install then return end
-    if result == "ok" then
-      self:finish_install(install, "Installed " .. install.platform.name
-        .. " and set up USB access. Now choose your board.")
-    elseif result == "cancelled" then
-      install.state = "setup"
-      install.setup_note = "The password dialog was closed. You can try again, or skip and do it later from the welcome screen."
-    elseif result == "unavailable" then
-      install.state = "setup-unavailable"
-    else
-      install.state, install.setup_output = "setup-failed", output
-    end
-    core.redraw = true
-  end)
-end
-
-
-function NewProjectView:skip_setup()
-  local install = self.install
-  access.record_setup(install.setup.id, install.setup.version, "skipped")
-  core.add_thread(access.check_setups)
-  self:finish_install(install, "Installed " .. install.platform.name
-    .. ". USB setup was skipped; you can run it later from the welcome screen. Now choose your board.")
-end
-
-
-function NewProjectView:toggle_script()
-  local install = self.install
-  if install.script_lines then
-    install.script_lines = nil
-  else
-    local fp = io.open(install.setup.script)
-    install.script_lines = {}
-    if fp then
-      for line in fp:lines() do table.insert(install.script_lines, (line:gsub("\t", "    "))) end
-      fp:close()
-    end
-  end
-  core.redraw = true
-end
-
-
-function NewProjectView:copy_setup_command()
-  local text = access.terminal_command({ "/bin/bash", self.install.setup.script })
-  system.set_clipboard(text)
-  core.log("Copied: %s", text)
-end
-
-
--- Enter/Next while the install panel is open.
-function NewProjectView:install_next()
-  local state = self.install.state
-  if state == "confirm" or state == "failed" then
-    self:start_install()
-  elseif state == "setup" or state == "setup-failed" then
-    self:start_setup()
-  elseif state == "setup-unavailable" then
-    self:skip_setup()
-  end
-end
-
-
--- Esc/Back while the install panel is open.
-function NewProjectView:install_back()
-  local state = self.install.state
-  if state == "confirm" or state == "failed" then
-    self.install = nil
-  elseif state == "setup" or state == "setup-failed" or state == "setup-unavailable" then
-    self:skip_setup()
-  end
-  core.redraw = true
-end
-
-
-function NewProjectView:cancel_install()
-  if self.install and self.install.state == "running" then
-    self.install.handle.cancelled = true
-    self.install.current = "Cancelling..."
-    core.redraw = true
-  end
-end
-
-
 function NewProjectView:create()
+  if not self:location_exists() then
+    self:set_message("The folder " .. common.home_encode(self.location or "?")
+      .. " does not exist. Create it with Create Folder, or choose another folder.", true)
+    return
+  end
   local problem = self:name_problem()
   if problem then
     self:set_message(problem, true)
@@ -646,7 +553,8 @@ function NewProjectView:create()
     local ok, err = project.create(path, board)
     self.creating = false
     if not ok then
-      self:set_message("Could not create the project: " .. tostring(err), true)
+      local explanation = cli.explain_error(err)
+      self:set_message("Could not create the project: " .. (explanation and (explanation .. " ") or "") .. tostring(err), true)
       return
     end
     self:set_message("Created " .. self.name .. ". Opening it...", false)
@@ -656,18 +564,8 @@ end
 
 
 -------------------------------------------------------------------------------
--- Layout and drawing
+-- Layout
 -------------------------------------------------------------------------------
-
-local heading_font, heading_scale
-local function get_heading_font()
-  if heading_scale ~= SCALE then
-    heading_font = style.font:copy(math.floor(26 * SCALE))
-    heading_scale = SCALE
-  end
-  return heading_font
-end
-
 
 -- Adds a clickable area; hit-testing uses the areas of the latest layout.
 function NewProjectView:add_target(id, x, y, w, h, run)
@@ -678,6 +576,39 @@ end
 function NewProjectView:update()
   NewProjectView.super.update(self)
   self:layout()
+end
+
+
+-- Creates a button spec and its click target.
+function NewProjectView:make_button(id, spec, x, y, h, align_right)
+  if not spec then return nil end
+  local w = style.font:get_width(spec.text) + style.padding.x * 3
+  local button = { id = id, text = spec.text, x = align_right and (x - w) or x, y = y, w = w, h = h,
+    enabled = spec.enabled ~= false and spec.run ~= nil, primary = spec.primary }
+  if button.enabled then self:add_target(id, button.x, button.y, button.w, button.h, spec.run) end
+  return button
+end
+
+
+-- Buttons of the page when no panel is open.
+function NewProjectView:page_buttons()
+  if self.load_error then
+    return { next = { text = "Try Again", run = function() self:load() end },
+      hint = "Enter: try again" }
+  end
+  local buttons = { hint = KEYS_HINT }
+  if self.step > 1 then buttons.back = { text = "←  Back", run = function() self:back() end } end
+  if self.step == NAME_STEP then
+    buttons.next = { text = "Create Project", run = function() self:next() end }
+  else
+    buttons.next = { text = "Next  →", run = function() self:next() end,
+      enabled = self:get_list()[self.selected] ~= nil }
+  end
+  if not self.boards or self.creating then
+    buttons.next.enabled = false
+    if buttons.back then buttons.back.enabled = not self.creating end
+  end
+  return buttons
 end
 
 
@@ -695,7 +626,7 @@ function NewProjectView:layout()
   local y = self.position.y + pad_y * 3
 
   L.title_y = y
-  y = y + get_heading_font():get_height() + pad_y
+  y = y + ui.heading_font():get_height() + pad_y
 
   -- step bar: completed steps show the choice and can be clicked to go back
   L.crumbs = {}
@@ -716,253 +647,93 @@ function NewProjectView:layout()
   L.question_y = y
   y = y + line_h + pad_y / 2
   L.hint_y = y
-  y = y + line_h + pad_y * 1.5
-
-  L.box = { x = L.x, y = y, w = L.w, h = box_h }
-  y = y + box_h + pad_y
+  y = y + line_h + pad_y
 
   -- bottom: message line, then buttons
   local button_h = box_h
   L.buttons_y = self.position.y + self.size.y - pad_y * 3 - button_h
   L.message_y = L.buttons_y - pad_y - row_h
 
-  local next_text, next_run, next_enabled = "Next  →", function() self:next() end, true
-  local extra_text, extra_run
-  local back_text, back_run = self.step > 1 and "←  Back" or nil, function() self:back() end
-  L.next_primary = true
-  if self.install then
-    local state = self.install.state
-    if state == "confirm" then
-      next_text, back_text = "Download and Install", "Not Now"
-    elseif state == "running" then
-      next_text, next_run, back_text = "Cancel", function() self:cancel_install() end, nil
-      next_enabled = not self.install.handle.cancelled
-      L.next_primary = false
-    elseif state == "failed" then
-      next_text, back_text = "Try Again", "←  Back"
-    elseif state == "setup" then
-      next_text, back_text = "Set Up Now", "Skip"
-      extra_text = self.install.script_lines and "Hide Script" or "Show Script"
-      extra_run = function() self:toggle_script() end
-    elseif state == "setup-running" then
-      next_text, back_text, next_enabled = "Waiting...", nil, false
-    elseif state == "setup-failed" then
-      next_text, back_text = "Try Again", "Skip"
-    elseif state == "setup-unavailable" then
-      next_text, back_text = "Continue", nil
-      extra_text, extra_run = "Copy Command", function() self:copy_setup_command() end
-    end
-  elseif self.step == NAME_STEP then
-    next_text = "Create Project"
-  else
-    next_enabled = self:get_list()[self.selected] ~= nil
-  end
-  next_enabled = next_enabled and not self.creating and self.boards ~= nil
+  local buttons = self.panel and self.panel:buttons() or self:page_buttons()
+  if self.creating and buttons.next then buttons.next.enabled = false end
+  L.next = self:make_button("button:next", buttons.next, L.x + L.w, L.buttons_y, button_h, true)
+  if L.next then L.next.primary = buttons.next.primary ~= false end
+  L.extra = self:make_button("button:extra", buttons.extra, (L.next and L.next.x or L.x + L.w) - pad_x, L.buttons_y, button_h, true)
+  L.back = self:make_button("button:back", buttons.back, L.x, L.buttons_y, button_h, false)
+  L.hint = (buttons.extra and "") or buttons.hint or ""
 
-  local next_w = font:get_width(next_text) + pad_x * 3
-  L.next = { id = "button:next", text = next_text, x = L.x + L.w - next_w, y = L.buttons_y, w = next_w, h = button_h,
-    enabled = next_enabled }
-  if L.next.enabled then
-    self:add_target(L.next.id, L.next.x, L.next.y, L.next.w, L.next.h, next_run)
-  end
-  if extra_text then
-    local extra_w = font:get_width(extra_text) + pad_x * 3
-    L.extra = { id = "button:extra", text = extra_text, x = L.next.x - pad_x - extra_w, y = L.buttons_y, w = extra_w,
-      h = button_h, enabled = true }
-    self:add_target(L.extra.id, L.extra.x, L.extra.y, L.extra.w, L.extra.h, extra_run)
-  end
-  if back_text then
-    local back_w = font:get_width(back_text) + pad_x * 3
-    L.back = { id = "button:back", text = back_text, x = L.x, y = L.buttons_y, w = back_w, h = button_h,
-      enabled = not self.creating }
-    if L.back.enabled then
-      self:add_target(L.back.id, L.back.x, L.back.y, L.back.w, L.back.h, back_run)
+  local area = { x = L.x, y = y, w = L.w, h = math.max(row_h, L.message_y - pad_y - y) }
+  if self.panel then
+    L.panel = area
+    if self.panel.layout then
+      self.panel:layout(area, function(...) self:add_target(...) end)
     end
-  end
-
-  if self.step == NAME_STEP then
-    L.problem_y = y - pad_y / 2
-    y = y + row_h + pad_y / 2
-    L.location_y = y
-    local change_text = "Change Folder..."
-    local change_w = font:get_width(change_text) + pad_x * 2
-    L.change = { id = "button:location", text = change_text, x = L.x + L.w - change_w, y = y - pad_y / 2, w = change_w, h = row_h + pad_y }
-    L.change.enabled = not self.creating
-    if L.change.enabled then
-      self:add_target(L.change.id, L.change.x, L.change.y, L.change.w, L.change.h, function() self:change_location() end)
-    end
-    y = y + row_h + pad_y
-    L.board_y = y
-  elseif self.install then
-    L.panel = { x = L.x, y = y, w = L.w, h = math.max(row_h, L.message_y - pad_y - y) }
+  elseif self.load_error then
+    L.load_error = area
   else
-    -- list of choices, scrolled to keep the selection visible
-    L.list = { x = L.x, y = y, w = L.w, h = math.max(row_h, L.message_y - pad_y - y) }
-    self.visible_rows = math.max(1, math.floor(L.list.h / row_h))
-    local items = self:get_list()
-    self.first_row = common.clamp(self.first_row, 1, math.max(1, #items - self.visible_rows + 1))
-    L.rows = {}
-    for i = self.first_row, math.min(#items, self.first_row + self.visible_rows - 1) do
-      local row = { item = items[i], index = i, id = "row:" .. items[i].key,
-        x = L.x, y = y + (i - self.first_row) * row_h, w = L.w, h = row_h }
-      table.insert(L.rows, row)
-      self:add_target(row.id, row.x, row.y, row.w, row.h, function(clicks)
-        self.selected = i
-        if clicks and clicks >= 2 then self:next() end
-        core.redraw = true
-      end)
+    L.box = { x = L.x, y = y, w = L.w, h = box_h }
+    y = y + box_h + pad_y
+    if self.step == NAME_STEP then
+      self:layout_name_step(L, y, row_h)
+    else
+      self:layout_list(L, { x = L.x, y = y, w = L.w, h = math.max(row_h, L.message_y - pad_y - y) }, row_h)
     end
-    L.more_below = #items >= self.first_row + self.visible_rows
-    L.row_h = row_h
   end
 
   self.current_layout = L
 end
 
 
-local function draw_border(x, y, w, h, color)
-  local t = math.max(1, math.floor(SCALE))
-  renderer.draw_rect(x, y, w, t, color)
-  renderer.draw_rect(x, y + h - t, w, t, color)
-  renderer.draw_rect(x, y, t, h, color)
-  renderer.draw_rect(x + w - t, y, t, h, color)
-end
-
-
-function NewProjectView:draw_button(button, primary)
-  if not button then return end
-  local hovered = button.enabled and self.hovered_id == button.id
-  local bg = hovered and style.selection or style.line_highlight
-  renderer.draw_rect(button.x, button.y, button.w, button.h, bg)
-  if primary and button.enabled then draw_border(button.x, button.y, button.w, button.h, style.caret) end
-  local color = not button.enabled and style.dim or (primary and style.accent or style.text)
-  common.draw_text(style.font, color, button.text, "center", button.x, button.y, button.w, button.h)
-end
-
-
--- Cuts text to fit in `width` pixels, ending it with an ellipsis when shortened.
-local function truncate(font, text, width)
-  if font:get_width(text) <= width then return text end
-  local ellipsis = "\u{2026}"
-  local cut = text
-  while cut ~= "" and font:get_width(cut .. ellipsis) > width do
-    cut = cut:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
-  end
-  return cut ~= "" and (cut:gsub("[%s,]+$", "") .. ellipsis) or ""
-end
-
-
--- Splits text into lines that fit in `width` pixels.
-local function wrap_text(font, text, width)
-  local lines, line = {}, ""
-  for word in text:gmatch("%S+") do
-    local candidate = line == "" and word or (line .. " " .. word)
-    if line ~= "" and font:get_width(candidate) > width then
-      table.insert(lines, line)
-      line = word
-    else
-      line = candidate
-    end
-  end
-  if line ~= "" then table.insert(lines, line) end
-  return lines
-end
-
-
-function NewProjectView:draw_install_panel(panel)
+function NewProjectView:layout_name_step(L, y, row_h)
   local font = style.font
   local pad_x, pad_y = style.padding.x, style.padding.y
-  local line_h = font:get_height() + pad_y / 2
-  local install, platform = self.install, self.install.platform
-  local x, y, w = panel.x + pad_x, panel.y + pad_y, panel.w - pad_x * 2
-  renderer.draw_rect(panel.x, panel.y, panel.w, panel.h, style.background2)
-  core.push_clip_rect(panel.x, panel.y, panel.w, panel.h)
+  L.problem_y = y - pad_y / 2
+  y = y + row_h + pad_y / 2
 
-  local function paragraph(text, color)
-    for _, line in ipairs(wrap_text(font, text, w)) do
-      common.draw_text(font, color, line, "left", x, y, 0, line_h)
-      y = y + line_h
-    end
-    y = y + pad_y / 2
+  local function side_button(id, text, run, top)
+    local w = font:get_width(text) + pad_x * 2
+    local button = { id = id, text = text, x = L.x + L.w - w, y = top - pad_y / 2, w = w, h = row_h + pad_y,
+      enabled = not self.creating }
+    if button.enabled then self:add_target(id, button.x, button.y, button.w, button.h, run) end
+    return button
   end
 
-  local version = platform.platform and platform.platform.latest_version or ""
-  if install.state == "confirm" then
-    paragraph(platform.name .. " is not installed yet", style.accent)
-    paragraph("Superduino can download and install it for you. Then you can choose your board.", style.text)
-    local boards = examples(platform.board_names)
-    if boards then paragraph("Boards in this family: " .. boards .. ".", style.dim) end
-    paragraph("Package: " .. platform.id .. (version ~= "" and ("  version " .. version) or "")
-      .. "  from " .. platform.vendor_name, style.dim)
-    paragraph("Downloading needs an internet connection and can take a few minutes for large families.", style.dim)
-  elseif install.state == "running" then
-    paragraph("Installing " .. platform.name, style.accent)
-    paragraph(install.current or "", style.text)
-    -- progress bar of the current download
-    local bar_h = math.floor(8 * SCALE)
-    local percent = install.progress and install.progress.percent or 0
-    renderer.draw_rect(x, y, w, bar_h, style.line_highlight)
-    renderer.draw_rect(x, y, math.floor(w * common.clamp(percent, 0, 100) / 100), bar_h, style.caret)
-    y = y + bar_h + pad_y
-    local p = install.progress
-    if p then
-      local parts = { string.format("%s of %s", p.done, p.total), string.format("%.0f%%", p.percent) }
-      if p.eta then table.insert(parts, (p.eta:gsub("^00m", "")) .. " left") end
-      paragraph(table.concat(parts, "   ·   "), style.dim)
-    else
-      y = y + line_h + pad_y / 2
-    end
-    if #install.done > 0 then
-      paragraph("Done so far:", style.dim)
-      local first = math.max(1, #install.done - math.max(1, math.floor((panel.y + panel.h - y) / line_h) - 1) + 1)
-      for i = first, #install.done do
-        common.draw_text(font, style.dim, "  " .. install.done[i], "left", x, y, 0, line_h)
-        y = y + line_h
-      end
-    end
-  elseif install.state == "failed" then
-    paragraph("Could not install " .. platform.name, style.error)
-    paragraph(install.error or "Unknown error", style.text)
-    paragraph("Check your internet connection and try again.", style.dim)
-  else
-    local setup = install.setup
-    paragraph(platform.name .. " is installed. One more step: USB access", style.accent)
-    if install.state == "setup-running" then
-      paragraph("Waiting for your password in the system dialog...", style.text)
-    elseif install.state == "setup-failed" then
-      paragraph("The setup script failed:", style.error)
-      paragraph(install.setup_output ~= "" and install.setup_output or "no output", style.text)
-    elseif install.state == "setup-unavailable" then
-      paragraph("Superduino could not show a password dialog because pkexec is not installed. "
-        .. "You can run this command in a terminal instead:", style.text)
-      paragraph(access.terminal_command({ "/bin/bash", setup.script }), style.accent)
-    else
-      paragraph("Some boards in this family use a special USB mode for uploading. Linux needs a permission rule "
-        .. "(a udev rule) for it, which this family provides as a setup script.", style.text)
-      paragraph("It runs once as administrator; your computer will ask for your password. You can also skip it "
-        .. "and run it later from the welcome screen.", style.dim)
-      if install.setup_note then paragraph(install.setup_note, style.warn) end
-    end
-    local label_end = common.draw_text(font, style.dim, "Script:", "left", x, y, 0, line_h)
-    local path_x = label_end + pad_x / 2
-    common.draw_text(font, style.dim, EmptyView.shorten_path(font, common.home_encode(setup.script), x + w - path_x),
-      "left", path_x, y, 0, line_h)
-    y = y + line_h + pad_y / 2
-    if install.script_lines then
-      renderer.draw_rect(x, y, w, math.max(0, panel.y + panel.h - y - pad_y), style.background)
-      local code_font = style.code_font
-      local code_h = code_font:get_height() + math.floor(2 * SCALE)
-      local cy = y + pad_y / 2
-      for _, line in ipairs(install.script_lines) do
-        if cy > panel.y + panel.h then break end
-        common.draw_text(code_font, style.text, line, "left", x + pad_x / 2, cy, 0, code_h)
-        cy = cy + code_h
-      end
-    end
+  L.location_y = y
+  L.change = side_button("button:location", "Change Folder...", function() self:change_location() end, y)
+  y = y + row_h + pad_y
+  if self.location and not self:location_exists() then
+    L.missing_y = y
+    L.create_folder = side_button("button:create-folder", "Create Folder", function() self:create_folder() end, y)
+    y = y + row_h + pad_y
   end
-  core.pop_clip_rect()
+  L.board_y = y
 end
 
+
+function NewProjectView:layout_list(L, list, row_h)
+  L.list = list
+  self.visible_rows = math.max(1, math.floor(list.h / row_h))
+  local items = self:get_list()
+  self.first_row = common.clamp(self.first_row, 1, math.max(1, #items - self.visible_rows + 1))
+  L.rows = {}
+  for i = self.first_row, math.min(#items, self.first_row + self.visible_rows - 1) do
+    local row = { item = items[i], index = i, id = "row:" .. items[i].key,
+      x = L.x, y = list.y + (i - self.first_row) * row_h, w = L.w, h = row_h }
+    table.insert(L.rows, row)
+    self:add_target(row.id, row.x, row.y, row.w, row.h, function(clicks)
+      self.selected = i
+      if clicks and clicks >= 2 then self:next() end
+      core.redraw = true
+    end)
+  end
+  L.more_below = #items >= self.first_row + self.visible_rows
+  L.row_h = row_h
+end
+
+
+-------------------------------------------------------------------------------
+-- Drawing
+-------------------------------------------------------------------------------
 
 function NewProjectView:draw()
   self:draw_background(style.background)
@@ -971,10 +742,11 @@ function NewProjectView:draw()
   local font = style.font
   local pad_x, pad_y = style.padding.x, style.padding.y
   local step = STEPS[self.step]
+  local heading = ui.heading_font()
 
-  common.draw_text(get_heading_font(), style.text, "New Project", "left", L.x, L.title_y, 0, get_heading_font():get_height())
+  common.draw_text(heading, style.text, "New Project", "left", L.x, L.title_y, 0, heading:get_height())
   common.draw_text(font, style.dim, string.format("Step %d of %d", self.step, #STEPS), "right",
-    L.x, L.title_y, L.w, get_heading_font():get_height())
+    L.x, L.title_y, L.w, heading:get_height())
 
   for i, crumb in ipairs(L.crumbs) do
     local color = style.dim
@@ -995,87 +767,25 @@ function NewProjectView:draw()
   common.draw_text(font, style.accent, step.question, "left", L.x, L.question_y, 0, font:get_height())
   common.draw_text(font, style.dim, step.hint, "left", L.x, L.hint_y, 0, font:get_height())
 
-  -- input box: search text for list steps, project name for the last step
-  local box = L.box
-  renderer.draw_rect(box.x, box.y, box.w, box.h, style.background2)
-  draw_border(box.x, box.y, box.w, box.h, style.caret)
-  local value = self.step == NAME_STEP and self.name or self.filter
-  local placeholder = self.step == NAME_STEP and NAME_PLACEHOLDER or LIST_PLACEHOLDER
-  local text_x = box.x + pad_x
-  core.push_clip_rect(box.x, box.y, box.w, box.h)
-  local caret_x = text_x
-  if value == "" then
-    common.draw_text(font, style.dim, placeholder, "left", text_x, box.y, 0, box.h)
-  else
-    caret_x = common.draw_text(font, style.text, value, "left", text_x, box.y, 0, box.h)
-  end
-  if not self.creating and core.active_view == self then
-    local caret_h = font:get_height()
-    renderer.draw_rect(caret_x, box.y + (box.h - caret_h) / 2, math.max(1, math.floor(SCALE * 2)), caret_h, style.caret)
-  end
-  core.pop_clip_rect()
-
-  if self.step == NAME_STEP then
-    local where = "Finding your sketchbook folder..."
-    if self.location then
-      local name = self.name == "" and NAME_PLACEHOLDER or self.name
-      where = common.home_encode(self.location .. PATHSEP .. name .. PATHSEP .. name .. ".ino")
-    end
-    local label_end = common.draw_text(font, style.dim, "Will be created as:", "left", L.x, L.location_y, 0, font:get_height())
-    local where_x = label_end + pad_x / 2
-    where = EmptyView.shorten_path(font, where, L.change.x - pad_x - where_x)
-    common.draw_text(font, style.text, where, "left", where_x, L.location_y, 0, font:get_height())
-    self:draw_button(L.change, false)
-
-    local board = self:get_board()
-    if board then
-      local label_end2 = common.draw_text(font, style.dim, "Board:", "left", L.x, L.board_y, 0, font:get_height())
-      local name_end = common.draw_text(font, style.text, board.name, "left", label_end2 + pad_x / 2, L.board_y, 0, font:get_height())
-      common.draw_text(font, style.dim, board.fqbn, "left", name_end + pad_x, L.board_y, 0, font:get_height())
-    end
-  elseif L.panel then
-    self:draw_install_panel(L.panel)
-  elseif L.rows then
-    if self.loading then
-      common.draw_text(font, style.dim, "Loading boards...", "left", L.x + pad_x, L.list.y, 0, L.row_h)
-    elseif #self:get_list() == 0 and self.boards then
-      common.draw_text(font, style.dim, "Nothing matches \"" .. self.filter .. "\"", "left", L.x + pad_x, L.list.y, 0, L.row_h)
-    end
-    for _, row in ipairs(L.rows) do
-      if row.index == self.selected then
-        renderer.draw_rect(row.x, row.y, row.w, row.h, style.selection)
-        renderer.draw_rect(row.x, row.y, math.max(1, math.floor(SCALE * 3)), row.h, style.caret)
-      elseif self.hovered_id == row.id then
-        renderer.draw_rect(row.x, row.y, row.w, row.h, style.line_highlight)
-      end
-      local item = row.item
-      -- dim text is hard to read on the selection color
-      local secondary = row.index == self.selected and style.text or style.dim
-      core.push_clip_rect(row.x, row.y, row.w - pad_x, row.h)
-      local label_end = common.draw_text(font, style.accent, item.label, "left", row.x + pad_x, row.y, 0, row.h)
-      local detail_x = row.x + row.w - pad_x
-      if item.detail then
-        detail_x = detail_x - font:get_width(item.detail)
-        common.draw_text(font, secondary, item.detail, "left", detail_x, row.y, 0, row.h)
-      end
-      if item.note then
-        local note_x = label_end + pad_x
-        local note = truncate(font, item.note, detail_x - pad_x - note_x)
-        common.draw_text(font, secondary, note, "left", note_x, row.y, 0, row.h)
-      end
-      core.pop_clip_rect()
-    end
-    if L.more_below then
-      common.draw_text(font, style.dim, "more below...", "right", L.x, L.list.y + L.list.h - L.row_h / 2, L.w - pad_x, L.row_h / 2)
+  if L.panel then
+    self.panel:draw(L.panel, self.hovered_id)
+  elseif L.load_error then
+    local W = ui.writer(L.load_error.x, L.load_error.y, L.load_error.w)
+    local explanation = cli.explain_error(self.load_error)
+    W.paragraph("Could not load the list of boards.", style.error)
+    if explanation then W.paragraph(explanation, style.text) end
+    W.paragraph("Details: " .. tostring(self.load_error), style.dim)
+  elseif L.box then
+    local value = self.step == NAME_STEP and self.name or self.filter
+    local placeholder = self.step == NAME_STEP and NAME_PLACEHOLDER or LIST_PLACEHOLDER
+    ui.draw_text_box(L.box, value, placeholder, not self.creating and core.active_view == self)
+    if self.step == NAME_STEP then
+      self:draw_name_step(L)
+    else
+      self:draw_list(L)
     end
   end
 
-  if self.step == NAME_STEP and self.name ~= "" and not self.creating then
-    local problem = self:name_problem()
-    if problem then
-      common.draw_text(font, style.warn, problem, "left", L.x, L.problem_y, 0, font:get_height() + pad_y)
-    end
-  end
   if self.message then
     local color = self.message_is_error and style.error or style.dim
     core.push_clip_rect(L.x, L.message_y, L.w, font:get_height() + pad_y)
@@ -1083,21 +793,67 @@ function NewProjectView:draw()
     core.pop_clip_rect()
   end
 
-  self:draw_button(L.back, false)
-  self:draw_button(L.extra, false)
-  self:draw_button(L.next, L.next_primary)
-  local keys_hint = KEYS_HINT
-  if self.install then
-    keys_hint = ({
-      confirm = "Enter: install    Esc: not now",
-      failed = "Enter: try again    Esc: go back",
-      setup = "Enter: set up now    Esc: skip",
-      ["setup-failed"] = "Enter: try again    Esc: skip",
-    })[self.install.state] or ""
-    -- the middle button takes the hint's place
-    if L.extra then keys_hint = "" end
+  ui.draw_button(L.back, self.hovered_id == "button:back", false)
+  ui.draw_button(L.extra, self.hovered_id == "button:extra", false)
+  ui.draw_button(L.next, self.hovered_id == "button:next", L.next and L.next.primary)
+  common.draw_text(font, style.dim, L.hint, "center", L.x, L.buttons_y, L.w, L.next and L.next.h or font:get_height())
+end
+
+
+function NewProjectView:draw_name_step(L)
+  local font = style.font
+  local pad_x, pad_y = style.padding.x, style.padding.y
+  local h = font:get_height()
+
+  if self.name ~= "" and not self.creating then
+    local problem = self:name_problem()
+    if problem then common.draw_text(font, style.warn, problem, "left", L.x, L.problem_y, 0, h + pad_y) end
   end
-  common.draw_text(font, style.dim, keys_hint, "center", L.x, L.buttons_y, L.w, L.next.h)
+
+  local function labelled(label, value, value_color, y, right_limit, shorten)
+    local label_end = common.draw_text(font, style.dim, label, "left", L.x, y, 0, h)
+    local value_x = label_end + pad_x / 2
+    local max_w = right_limit - pad_x - value_x
+    value = shorten and EmptyView.shorten_path(font, value, max_w) or ui.truncate(font, value, max_w)
+    return common.draw_text(font, value_color, value, "left", value_x, y, 0, h)
+  end
+
+  local where = "Finding your sketchbook folder..."
+  if self.location then
+    local name = self.name == "" and NAME_PLACEHOLDER or self.name
+    where = common.home_encode(self.location .. PATHSEP .. name .. PATHSEP .. name .. ".ino")
+  end
+  labelled("Will be created as:", where, style.text, L.location_y, L.change.x, true)
+  ui.draw_button(L.change, self.hovered_id == L.change.id, false)
+
+  if L.missing_y then
+    labelled("Folder missing:", common.home_encode(self.location) .. " does not exist yet", style.warn,
+      L.missing_y, L.create_folder.x, false)
+    ui.draw_button(L.create_folder, self.hovered_id == L.create_folder.id, false)
+  end
+
+  local board = self:get_board()
+  if board then
+    local name_end = labelled("Board:", board.name, style.text, L.board_y, L.x + L.w, false)
+    common.draw_text(font, style.dim, board.fqbn, "left", name_end + pad_x, L.board_y, 0, h)
+  end
+
+end
+
+
+function NewProjectView:draw_list(L)
+  local font = style.font
+  local pad_x = style.padding.x
+  if self.loading then
+    common.draw_text(font, style.dim, "Loading boards... (the first time, arduino-cli also downloads its tools)",
+      "left", L.x + pad_x, L.list.y, 0, L.row_h)
+  elseif #self:get_list() == 0 and self.boards then
+    common.draw_text(font, style.dim, "Nothing matches \"" .. self.filter .. "\"", "left", L.x + pad_x, L.list.y, 0, L.row_h)
+  end
+  ui.draw_rows(L.rows, self.selected, self.hovered_id)
+  if L.more_below then
+    common.draw_text(font, style.dim, "more below...", "right", L.x, L.list.y + L.list.h - L.row_h / 2, L.w - pad_x, L.row_h / 2)
+  end
 end
 
 
@@ -1142,6 +898,10 @@ end
 
 
 function NewProjectView:on_mouse_wheel(dy)
+  if self.panel then
+    if self.panel.wheel then self.panel:wheel(dy) end
+    return true
+  end
   if self.step == NAME_STEP then return end
   local count = #self:get_list()
   local rows = self.visible_rows or 1
@@ -1157,15 +917,30 @@ end
 
 
 ---Opens the New Project page, or focuses it when it is already open.
-function NewProjectView.open()
-  if open_view and core.root_view.root_node:get_node_for_view(open_view) then
-    local node = core.root_view.root_node:get_node_for_view(open_view)
-    node:set_active_view(open_view)
-    return open_view
+---@param options? { repair?: string } Open straight into repairing a half installed
+---platform (by id).
+function NewProjectView.open(options)
+  local view = open_view
+  if view and core.root_view.root_node:get_node_for_view(view) then
+    core.root_view.root_node:get_node_for_view(view):set_active_view(view)
+  else
+    view = NewProjectView()
+    open_view = view
+    core.root_view:get_active_node_default():add_view(view)
   end
-  open_view = NewProjectView()
-  core.root_view:get_active_node_default():add_view(open_view)
-  return open_view
+  options = options or {}
+  if options.repair and not view.panel then
+    local name = options.repair
+    for _, broken in ipairs(project.incomplete_installs()) do
+      if broken.id == options.repair then name = broken.name end
+    end
+    local vendor = options.repair:match("^([^:]+)")
+    view.choice[1] = vendor
+    view.step = 2
+    view:open_panel(InstallPanel.new(view, { id = options.repair, name = name, vendor_name = vendor,
+      board_names = {} }, "repair"))
+  end
+  return view
 end
 
 
