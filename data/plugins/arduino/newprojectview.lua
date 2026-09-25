@@ -1,6 +1,6 @@
 -- Step-by-step "New Project" page: vendor, architecture, board, then a name.
--- Panels (install/repair) temporarily replace the list or name area; see
--- install_panel.lua.
+-- Panels (install/repair, board indexes) temporarily replace the list or name
+-- area; see install_panel.lua and indexes_panel.lua.
 local core = require "core"
 local common = require "core.common"
 local command = require "core.command"
@@ -13,6 +13,7 @@ local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
 local ui = require "plugins.arduino.ui"
 local InstallPanel = require "plugins.arduino.install_panel"
+local IndexesPanel = require "plugins.arduino.indexes_panel"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -64,7 +65,8 @@ function NewProjectView:new()
   self.location = nil
   self.boards = nil
   self.platforms = {}
-  self.panel = nil -- e.g. InstallPanel
+  self.panel = nil -- InstallPanel or IndexesPanel
+  self.index = { state = "idle" } -- board list refresh: idle, updating, updated, offline, failed
   self.loading = true
   self.load_error = nil
   self.message = nil
@@ -129,6 +131,33 @@ function NewProjectView:load()
       self.load_error = err
     else
       self:enter_step(self.step)
+      self:refresh_index()
+    end
+    core.redraw = true
+  end)
+end
+
+
+---Downloads the latest board list in the background, then updates the lists.
+function NewProjectView:refresh_index()
+  if self.index.state == "updating" then return end
+  self.index = { state = "updating" }
+  core.redraw = true
+  core.add_thread(function()
+    local ok, err = project.update_index()
+    if ok then
+      self.index = { state = "updated", time = os.time() }
+      local platforms = project.load_platforms()
+      if platforms then
+        self.platforms = platforms
+        self.list_key = nil
+        self:keep_selection()
+      end
+    else
+      local explanation, is_network = cli.explain_error(err)
+      self.index = { state = is_network and "offline" or "failed", explanation = explanation, error = err,
+        age = project.index_age() }
+      core.warn("Could not refresh the board list: %s", err)
     end
     core.redraw = true
   end)
@@ -281,6 +310,18 @@ function NewProjectView:get_list()
     self.list = filter_items(self:get_step_items(self.step), self.filter)
   end
   return self.list
+end
+
+
+-- Keeps the same item selected after the list was reloaded.
+function NewProjectView:keep_selection()
+  if self.step >= NAME_STEP then return end
+  local key = self.list and self.list[self.selected] and self.list[self.selected].key or self.choice[self.step]
+  self.list_key = nil
+  for i, item in ipairs(self:get_list()) do
+    if item.key == key then self.selected = i return end
+  end
+  self.selected = math.min(self.selected, math.max(1, #self:get_list()))
 end
 
 
@@ -649,6 +690,26 @@ function NewProjectView:layout()
   L.hint_y = y
   y = y + line_h + pad_y
 
+  -- board list status and tools on the vendor and architecture steps
+  if self.step <= 2 and not self.panel and not self.load_error then
+    L.tools_y = y
+    local right = L.x + L.w
+    L.tools = {}
+    for _, tool in ipairs({
+      { id = "tool:indexes", text = "Board Indexes...", run = function() self:open_panel(IndexesPanel.new(self)) end },
+      { id = "tool:refresh", text = "Refresh", run = function() self:refresh_index() end,
+        enabled = self.index.state ~= "updating" },
+    }) do
+      local w = font:get_width(tool.text) + pad_x
+      local link = { id = tool.id, text = tool.text, x = right - w, y = y, w = w, h = row_h, enabled = tool.enabled ~= false }
+      if link.enabled then self:add_target(link.id, link.x, link.y, link.w, link.h, tool.run) end
+      table.insert(L.tools, link)
+      right = right - w - pad_x / 2
+    end
+    L.tools_status_w = right - L.x - pad_x
+    y = y + row_h + pad_y / 2
+  end
+
   -- bottom: message line, then buttons
   local button_h = box_h
   L.buttons_y = self.position.y + self.size.y - pad_y * 3 - button_h
@@ -735,6 +796,23 @@ end
 -- Drawing
 -------------------------------------------------------------------------------
 
+-- Text of the board list status line.
+function NewProjectView:index_status()
+  local index = self.index
+  if index.state == "updating" then
+    return "Updating the board list...", style.dim
+  elseif index.state == "updated" then
+    return "Board list updated " .. ui.age(os.time() - index.time) .. ".", style.dim
+  elseif index.state == "offline" then
+    return "Offline: using the board list from " .. (index.age and ui.age(index.age) or "an earlier download") .. ".",
+      style.warn
+  elseif index.state == "failed" then
+    return "The board list could not be refreshed: " .. (index.explanation or index.error or "?"), style.warn
+  end
+  return "", style.dim
+end
+
+
 function NewProjectView:draw()
   self:draw_background(style.background)
   local L = self.current_layout
@@ -766,6 +844,17 @@ function NewProjectView:draw()
 
   common.draw_text(font, style.accent, step.question, "left", L.x, L.question_y, 0, font:get_height())
   common.draw_text(font, style.dim, step.hint, "left", L.x, L.hint_y, 0, font:get_height())
+
+  if L.tools then
+    local text, color = self:index_status()
+    common.draw_text(font, color, ui.truncate(font, text, L.tools_status_w), "left", L.x, L.tools_y, 0, L.tools[1].h)
+    for _, link in ipairs(L.tools) do
+      if self.hovered_id == link.id and link.enabled then
+        renderer.draw_rect(link.x, link.y, link.w, link.h, style.line_highlight)
+      end
+      common.draw_text(font, link.enabled and style.accent or style.dim, link.text, "center", link.x, link.y, link.w, link.h)
+    end
+  end
 
   if L.panel then
     self.panel:draw(L.panel, self.hovered_id)
@@ -917,8 +1006,8 @@ end
 
 
 ---Opens the New Project page, or focuses it when it is already open.
----@param options? { repair?: string } Open straight into repairing a half installed
----platform (by id).
+---@param options? { repair?: string, indexes?: boolean } Open straight into repairing a
+---half installed platform (by id) or managing board indexes.
 function NewProjectView.open(options)
   local view = open_view
   if view and core.root_view.root_node:get_node_for_view(view) then
@@ -929,7 +1018,9 @@ function NewProjectView.open(options)
     core.root_view:get_active_node_default():add_view(view)
   end
   options = options or {}
-  if options.repair and not view.panel then
+  if options.indexes and not view.panel then
+    view:open_panel(IndexesPanel.new(view))
+  elseif options.repair and not view.panel then
     local name = options.repair
     for _, broken in ipairs(project.incomplete_installs()) do
       if broken.id == options.repair then name = broken.name end

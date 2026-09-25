@@ -276,6 +276,69 @@ function project.repair_platform(id, handle, on_event)
 end
 
 
+-------------------------------------------------------------------------------
+-- Board indexes
+-------------------------------------------------------------------------------
+
+---The Boards Manager index that arduino-cli always uses.
+project.DEFAULT_INDEX_URL = "https://downloads.arduino.cc/packages/package_index.json"
+
+---Downloads the latest board indexes. Must be called from a thread.
+---@return boolean updated
+---@return string? error
+function project.update_index()
+  local _, err = cli.run_json({ "core", "update-index" }, { timeout = 120 })
+  if err then return false, err end
+  platforms_cache = nil
+  return true
+end
+
+
+---Seconds since the board index was last downloaded, or nil when there is none.
+---Must be called from a thread.
+function project.index_age()
+  local data_dir = cli.run_json({ "config", "get", "directories.data" })
+  if type(data_dir) ~= "string" then return nil end
+  local info = system.get_file_info(data_dir .. PATHSEP .. "package_index.json")
+  -- modification times have fractions of a second; os.time() does not
+  return info and math.max(0, os.time() - math.floor(info.modified)) or nil
+end
+
+
+---Extra board index URLs configured in arduino-cli. Must be called from a thread.
+---@return string[]
+function project.additional_urls()
+  local urls = cli.run_json({ "config", "get", "board_manager.additional_urls" })
+  return type(urls) == "table" and urls or {}
+end
+
+
+---Adds an extra board index URL and downloads it. Must be called from a thread.
+---@return boolean added The URL is configured (even when downloading it failed).
+---@return string? error Why the index could not be downloaded.
+function project.add_index_url(url)
+  local _, err = cli.run_json({ "config", "add", "board_manager.additional_urls", url })
+  if err then return false, err end
+  local updated, update_err = project.update_index()
+  if not updated then
+    -- report only problems with this URL; others may fail for unrelated reasons
+    for line in update_err:gmatch("[^\n]+") do
+      if line:find(url, 1, true) then return true, line end
+    end
+    return true, update_err
+  end
+  return true
+end
+
+
+---Removes an extra board index URL. Must be called from a thread.
+function project.remove_index_url(url)
+  local _, err = cli.run_json({ "config", "remove", "board_manager.additional_urls", url })
+  platforms_cache = nil
+  return err == nil, err
+end
+
+
 ---Returns the sketchbook folder configured in arduino-cli.
 ---Must be called from a thread (see `core.add_thread`).
 ---@return string?

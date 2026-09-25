@@ -92,6 +92,14 @@ command.add(nil, {
     managed.download()
   end,
 
+  ["arduino:manage-board-indexes"] = function()
+    if cli.status ~= "ok" then
+      core.error("arduino-cli is not available; see the Arduino CLI section on the welcome screen")
+      return
+    end
+    NewProjectView.open({ indexes = true })
+  end,
+
   ["arduino:repair-platform"] = function()
     local broken = project.incomplete_installs()
     if #broken == 0 then
