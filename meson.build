@@ -1,6 +1,6 @@
 project('superduino',
     ['c'],
-    version : '2.1.7',
+    version : '0.1.0',
     license : 'MIT',
     meson_version : '>= 0.63',
     default_options : [
