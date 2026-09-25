@@ -6,6 +6,7 @@ local config = require "core.config"
 local style = require "core.style"
 local EmptyView = require "core.emptyview"
 local cli = require "plugins.arduino.cli"
+local project = require "plugins.arduino.project"
 
 
 local function open_url(url)
@@ -58,6 +59,10 @@ end
 
 
 command.add(nil, {
+  ["arduino:new-project"] = function()
+    project.new()
+  end,
+
   ["arduino:locate-cli"] = function()
     locate(config.use_system_file_picker)
   end,
@@ -75,6 +80,9 @@ command.add(nil, {
     open_url(cli.INSTALL_URL)
   end,
 })
+
+
+table.insert(EmptyView.actions, 1, { label = "Create New Project...", cmd = "arduino:new-project" })
 
 
 local function action(id, label, cmd)
@@ -118,5 +126,6 @@ EmptyView.add_section({
 
 
 cli.init()
+project.open_pending()
 
 return cli

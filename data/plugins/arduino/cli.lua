@@ -1,6 +1,7 @@
 -- Locates the arduino-cli executable, remembers its location and checks that it works.
 local core = require "core"
 local storage = require "core.storage"
+local json = require "plugins.arduino.json"
 
 local cli = {}
 
@@ -77,37 +78,72 @@ function cli.find_global()
 end
 
 
--- Runs `arduino-cli version`; must be called from a thread.
-local function read_version(path)
-  local ok, proc = pcall(process.start, { path, "version", "--format", "json" }, {
-    stdin = process.REDIRECT_DISCARD,
-    stderr = process.REDIRECT_STDOUT,
-  })
+---Runs an arduino-cli command and collects its output.
+---Must be called from a thread (see `core.add_thread`).
+---@param args string[] Arguments passed to arduino-cli.
+---@param options? { path?: string, timeout?: number } `path` defaults to `cli.path`.
+---@return string? stdout nil when the process could not be started or timed out
+---@return string stderr_or_error
+---@return integer? exit_code
+function cli.run(args, options)
+  options = options or {}
+  local path = options.path or cli.path
+  if not path then return nil, "arduino-cli is not configured" end
+  local command = { path }
+  for _, arg in ipairs(args) do table.insert(command, arg) end
+  local ok, proc = pcall(process.start, command, { stdin = process.REDIRECT_DISCARD })
   if not ok then return nil, tostring(proc) end
   -- Read until the process exits. We can't use stream:read("all") because reads
   -- keep returning "" instead of nil after the process has exited.
-  local chunks = {}
-  local deadline = system.get_time() + CHECK_TIMEOUT
+  local out, err = {}, {}
+  local deadline = options.timeout and system.get_time() + options.timeout
   while true do
     local running = proc:running()
-    local chunk = proc:read_stdout(4096)
-    if chunk and #chunk > 0 then
-      table.insert(chunks, chunk)
-    elseif not chunk or not running then
-      break
-    elseif system.get_time() > deadline then
-      proc:kill()
-      return nil, "no response within " .. CHECK_TIMEOUT .. " seconds"
-    else
+    local out_chunk = proc:read_stdout(4096)
+    local err_chunk = proc:read_stderr(4096)
+    if out_chunk and #out_chunk > 0 then table.insert(out, out_chunk) end
+    if err_chunk and #err_chunk > 0 then table.insert(err, err_chunk) end
+    local got_data = (out_chunk and #out_chunk > 0) or (err_chunk and #err_chunk > 0)
+    if not got_data then
+      if not running or (not out_chunk and not err_chunk) then break end
+      if deadline and system.get_time() > deadline then
+        proc:kill()
+        return nil, "no response within " .. options.timeout .. " seconds"
+      end
       coroutine.yield(0.05)
     end
   end
-  local output = table.concat(chunks)
-  local exit_code = proc:returncode()
-  local version = output:match('"VersionString"%s*:%s*"([^"]+)"')
-  if exit_code == 0 and version then return version end
-  local message = output:gsub("%s+$", ""):match("[^\n]*$")
+  return table.concat(out), table.concat(err), proc:returncode()
+end
+
+
+---Runs an arduino-cli command with `--json` and decodes its output.
+---Must be called from a thread (see `core.add_thread`).
+---@param args string[]
+---@param options? { path?: string, timeout?: number }
+---@return any? result Decoded output when the command succeeded.
+---@return string? error Message explaining the failure otherwise.
+function cli.run_json(args, options)
+  local json_args = { table.unpack(args) }
+  table.insert(json_args, "--json")
+  local stdout, stderr, exit_code = cli.run(json_args, options)
+  if not stdout then return nil, stderr end
+  local result = json.decode(stdout)
+  if exit_code == 0 and result ~= nil then return result end
+  if type(result) == "table" and type(result.error) == "string" then
+    return nil, result.error
+  end
+  local message = (stderr ~= "" and stderr or stdout):gsub("%s+$", ""):match("[^\n]*$")
   return nil, (message ~= "" and message) or ("exited with code " .. tostring(exit_code))
+end
+
+
+-- Asks the executable at `path` for its version; must be called from a thread.
+local function read_version(path)
+  local result, err = cli.run_json({ "version" }, { path = path, timeout = CHECK_TIMEOUT })
+  if not result then return nil, err end
+  if type(result.VersionString) ~= "string" then return nil, "did not report a version" end
+  return result.VersionString
 end
 
 
