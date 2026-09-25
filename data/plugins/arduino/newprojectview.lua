@@ -1,6 +1,6 @@
 -- Step-by-step "New Project" page: vendor, architecture, board, then a name.
--- Panels (install/repair, board indexes) temporarily replace the list or name
--- area; see install_panel.lua and indexes_panel.lua.
+-- Panels (install/repair, board indexes, templates) temporarily replace the
+-- list or name area; see install_panel.lua, indexes_panel.lua, templates_panel.lua.
 local core = require "core"
 local common = require "core.common"
 local command = require "core.command"
@@ -14,6 +14,7 @@ local project = require "plugins.arduino.project"
 local ui = require "plugins.arduino.ui"
 local InstallPanel = require "plugins.arduino.install_panel"
 local IndexesPanel = require "plugins.arduino.indexes_panel"
+local TemplatesPanel = require "plugins.arduino.templates_panel"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -63,9 +64,10 @@ function NewProjectView:new()
   self.first_row = 1
   self.name = ""
   self.location = nil
+  self.template = nil -- nil means the empty sketch
   self.boards = nil
   self.platforms = {}
-  self.panel = nil -- InstallPanel or IndexesPanel
+  self.panel = nil -- InstallPanel, IndexesPanel or TemplatesPanel
   self.index = { state = "idle" } -- board list refresh: idle, updating, updated, offline, failed
   self.loading = true
   self.load_error = nil
@@ -417,6 +419,7 @@ function NewProjectView:next()
     self.choice[self.step] = item.key
     -- later choices depended on this one
     for i = self.step + 1, NAME_STEP - 1 do self.choice[i] = nil end
+    if self.step == 3 then self.template = nil end
   end
   self.message = nil
   self:enter_step(self.step + 1)
@@ -575,6 +578,12 @@ function NewProjectView:change_location()
 end
 
 
+function NewProjectView:choose_template()
+  local board = self:get_board()
+  if board then self:open_panel(TemplatesPanel.new(self, board)) end
+end
+
+
 function NewProjectView:create()
   if not self:location_exists() then
     self:set_message("The folder " .. common.home_encode(self.location or "?")
@@ -591,7 +600,7 @@ function NewProjectView:create()
   self.creating = true
   self:set_message("Creating " .. self.name .. "...", false)
   core.add_thread(function()
-    local ok, err = project.create(path, board)
+    local ok, err = project.create(path, board, self.template)
     self.creating = false
     if not ok then
       local explanation = cli.explain_error(err)
@@ -768,6 +777,9 @@ function NewProjectView:layout_name_step(L, y, row_h)
     y = y + row_h + pad_y
   end
   L.board_y = y
+  y = y + row_h + pad_y
+  L.template_y = y
+  L.choose_template = side_button("button:template", "Choose Template...", function() self:choose_template() end, y)
 end
 
 
@@ -927,6 +939,14 @@ function NewProjectView:draw_name_step(L)
     common.draw_text(font, style.dim, board.fqbn, "left", name_end + pad_x, L.board_y, 0, h)
   end
 
+  local template = self.template
+  local template_text = template and template.name or "Empty sketch"
+  local note = template and (template.kind == "builtin" and "Superduino starter" or ("example of " .. template.group))
+    or "optional: start from a starter or an example"
+  local name_end = labelled("Start from:", template_text, style.text, L.template_y, L.choose_template.x, false)
+  common.draw_text(font, style.dim, ui.truncate(font, note, L.choose_template.x - pad_x - name_end - pad_x), "left",
+    name_end + pad_x, L.template_y, 0, h)
+  ui.draw_button(L.choose_template, self.hovered_id == L.choose_template.id, false)
 end
 
 

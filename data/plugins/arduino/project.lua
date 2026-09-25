@@ -374,18 +374,136 @@ end
 
 
 -------------------------------------------------------------------------------
+-- Templates
+-------------------------------------------------------------------------------
+
+---A starting point for a new sketch.
+---@class arduino.template
+---@field kind "empty"|"builtin"|"example"
+---@field name string e.g. "Blink" or "SoftwareSerialExample"
+---@field description string
+---@field group string "Superduino starters" or the library name
+---@field path? string Template file (builtin) or example folder (example).
+
+---The default: arduino-cli's empty sketch.
+project.EMPTY_TEMPLATE = { kind = "empty", name = "Empty sketch", group = "",
+  description = "setup() and loop(), nothing else" }
+
+local TEMPLATES_DIR = DATADIR .. PATHSEP .. "plugins" .. PATHSEP .. "arduino" .. PATHSEP .. "templates"
+
+---Starter sketches that ship with Superduino.
+---@return arduino.template[]
+function project.builtin_templates()
+  local templates = {}
+  for _, file in ipairs(system.list_dir(TEMPLATES_DIR) or {}) do
+    local name = file:match("^(.+)%.ino$")
+    if name then
+      local path = TEMPLATES_DIR .. PATHSEP .. file
+      local fp = io.open(path)
+      local first = fp and fp:read("l") or ""
+      if fp then fp:close() end
+      local description = first:match("^//%s*[^:]+:%s*(.+)$") or ""
+      table.insert(templates, { kind = "builtin", name = name, group = "Superduino starters",
+        description = description, path = path })
+    end
+  end
+  table.sort(templates, function(a, b) return a.name < b.name end)
+  return templates
+end
+
+
+---Examples of the libraries available for a board (from `arduino-cli lib examples`).
+---Must be called from a thread.
+---@param fqbn string
+---@return arduino.template[]? templates
+---@return string? error
+function project.load_examples(fqbn)
+  local result, err = cli.run_json({ "lib", "examples", "--fqbn", fqbn })
+  if not result then return nil, err end
+  local templates = {}
+  for _, entry in ipairs(result.examples or {}) do
+    local library = entry.library or {}
+    for _, dir in ipairs(entry.examples or {}) do
+      table.insert(templates, { kind = "example", name = common.basename(dir), group = library.name or "?",
+        description = "example of the " .. (library.name or "?") .. " library", path = dir })
+    end
+  end
+  table.sort(templates, function(a, b)
+    if a.group ~= b.group then return a.group:lower() < b.group:lower() end
+    return a.name:lower() < b.name:lower()
+  end)
+  return templates
+end
+
+
+local function copy_file(from, to)
+  local src = io.open(from, "rb")
+  if not src then return false, "cannot read " .. from end
+  local data = src:read("a")
+  src:close()
+  local dst = io.open(to, "wb")
+  if not dst then return false, "cannot write " .. to end
+  dst:write(data)
+  dst:close()
+  return true
+end
+
+
+local function copy_tree(from, to)
+  for _, name in ipairs(system.list_dir(from) or {}) do
+    local src, dst = from .. PATHSEP .. name, to .. PATHSEP .. name
+    local info = system.get_file_info(src)
+    if info and info.type == "dir" then
+      if not system.get_file_info(dst) then
+        local ok, err = common.mkdirp(dst)
+        if not ok then return false, err end
+      end
+      local copied, copy_err = copy_tree(src, dst)
+      if not copied then return false, copy_err end
+    elseif info then
+      local ok, err = copy_file(src, dst)
+      if not ok then return false, err end
+    end
+  end
+  return true
+end
+
+
+-- Puts a template's files into a freshly created sketch folder.
+local function apply_template(path, template)
+  local name = common.basename(path)
+  local main = path .. PATHSEP .. name .. ".ino"
+  if template.kind == "builtin" then
+    return copy_file(template.path, main)
+  elseif template.kind == "example" then
+    local ok, err = copy_tree(template.path, path)
+    if not ok then return false, err end
+    -- the example's main file is named after its folder; the sketch's after the project
+    local example_main = path .. PATHSEP .. common.basename(template.path) .. ".ino"
+    if example_main ~= main and system.get_file_info(example_main) then
+      os.remove(main)
+      local renamed, rename_err = os.rename(example_main, main)
+      if not renamed then return false, rename_err end
+    end
+  end
+  return true
+end
+
+
+-------------------------------------------------------------------------------
 -- Creating projects
 -------------------------------------------------------------------------------
 
----Creates the sketch at `path` with a default build profile for `board`.
----The parent folder must exist:
+---Creates the sketch at `path` with a default build profile for `board`,
+---optionally starting from a template. The parent folder must exist:
 ---arduino-cli would silently create missing folders.
 ---Must be called from a thread (see `core.add_thread`).
 ---@param path string
 ---@param board arduino.board
+---@param template? arduino.template
 ---@return boolean created
 ---@return string? error
-function project.create(path, board)
+function project.create(path, board, template)
   local name = common.basename(path)
   local parent = common.dirname(path)
   local parent_info = parent and system.get_file_info(parent)
@@ -394,6 +512,12 @@ function project.create(path, board)
   end
   local _, err = cli.run_json({ "sketch", "new", path })
   if err then return false, err end
+  if template and template.kind ~= "empty" then
+    local ok, template_err = apply_template(path, template)
+    if not ok then
+      core.error("Created %s, but could not copy the template %s: %s", name, template.name, template_err)
+    end
+  end
   local profile = project.profile_name(board.fqbn)
   _, err = cli.run_json({ "profile", "create", "--profile", profile, "--fqbn", board.fqbn, "--set-default", path })
   if err then
