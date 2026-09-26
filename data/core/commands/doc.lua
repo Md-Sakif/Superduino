@@ -1,6 +1,21 @@
 local core = require "core"
 local command = require "core.command"
 local common = require "core.common"
+local Project = require "core.project"
+
+-- A path relative to the open project when it is inside it (what the deprecated
+-- core.normalize_to_project_dir did, without its warning).
+local function project_relative(path)
+  local project = core.root_project()
+  return project and project:normalize_path(path) or common.normalize_path(path)
+end
+
+-- An absolute path, relative ones taken from the open project (what the
+-- deprecated core.project_absolute_path did, without its warning).
+local function project_absolute(path)
+  local project = core.root_project()
+  return project and project:absolute_path(path) or Project.absolute_path(nil, common.normalize_path(path))
+end
 local config = require "core.config"
 local translate = require "core.doc.translate"
 local style = require "core.style"
@@ -34,8 +49,8 @@ end
 local function save(filename)
   local abs_filename
   if filename then
-    filename = core.normalize_to_project_dir(filename)
-    abs_filename = core.project_absolute_path(filename)
+    filename = project_relative(filename)
+    abs_filename = project_absolute(filename)
   end
   local ok, err = pcall(doc().save, doc(), filename, abs_filename)
   if ok then
@@ -582,7 +597,7 @@ local commands = {
       text = dv.doc.filename
     elseif last_doc and last_doc.filename then
       local dirname, filename = core.last_active_view.doc.abs_filename:match("(.*)[/\\](.+)$")
-      text = core.normalize_to_project_dir(dirname) .. PATHSEP
+      text = project_relative(dirname) .. PATHSEP
       local project = core.root_project()
       if project and text == project.path then text = "" end
     end

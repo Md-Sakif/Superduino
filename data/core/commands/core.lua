@@ -1,5 +1,20 @@
 local core = require "core"
 local common = require "core.common"
+local Project = require "core.project"
+
+-- A path relative to the open project when it is inside it (what the deprecated
+-- core.normalize_to_project_dir did, without its warning).
+local function project_relative(path)
+  local project = core.root_project()
+  return project and project:normalize_path(path) or common.normalize_path(path)
+end
+
+-- An absolute path, relative ones taken from the open project (what the
+-- deprecated core.project_absolute_path did, without its warning).
+local function project_absolute(path)
+  local project = core.root_project()
+  return project and project:absolute_path(path) or Project.absolute_path(nil, common.normalize_path(path))
+end
 local command = require "core.command"
 local config = require "core.config"
 local keymap = require "core.keymap"
@@ -35,7 +50,7 @@ local function open_file(use_dialog)
       if use_dialog then
         default_text = dirname
       else
-        dirname = core.normalize_to_project_dir(dirname)
+        dirname = project_relative(dirname)
         local project = core.root_project()
         default_text = (project and dirname == project.path) and "" or common.home_encode(dirname) .. PATHSEP
       end
@@ -65,14 +80,14 @@ local function open_file(use_dialog)
   core.command_view:enter("Open File", {
     text = default_text,
     submit = function(text)
-      local filename = core.project_absolute_path(common.home_expand(text))
+      local filename = project_absolute(common.home_expand(text))
       core.root_view:open_doc(core.open_doc(filename))
     end,
     suggest = function (text)
       return common.home_encode_list(common.path_suggest(common.home_expand(text), core.root_project() and core.root_project().path))
     end,
     validate = function(text)
-        local filename = core.project_absolute_path(common.home_expand(text))
+        local filename = project_absolute(common.home_expand(text))
         local path_stat, err = system.get_file_info(filename)
         if err then
           if err:find("No such file", 1, true) then

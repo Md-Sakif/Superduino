@@ -1,6 +1,13 @@
 -- mod-version:4
 local core = require "core"
 local common = require "core.common"
+
+-- A path relative to the open project when it is inside it (what the deprecated
+-- core.normalize_to_project_dir did, without its warning).
+local function project_relative(path)
+  local project = core.root_project()
+  return project and project:normalize_path(path) or common.normalize_path(path)
+end
 local command = require "core.command"
 local config = require "core.config"
 local keymap = require "core.keymap"
@@ -659,7 +666,7 @@ end, {
   end,
 
   ["treeview:rename"] = function(item)
-    local old_filename = core.normalize_to_project_dir(item.abs_filename)
+    local old_filename = project_relative(item.abs_filename)
     local old_abs_filename = item.abs_filename
     core.command_view:enter("Rename", {
       text = old_filename,
@@ -751,7 +758,7 @@ command.add(TreeView, {
         if core.last_active_view and core.active_view == view then
           core.set_active_view(core.last_active_view)
         end
-        view:open_doc(core.normalize_to_project_dir(item.abs_filename))
+        view:open_doc(project_relative(item.abs_filename))
       end)
     end
   end,
