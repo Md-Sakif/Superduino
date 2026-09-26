@@ -171,9 +171,10 @@ end
 
 function IndexesPanel:intro()
   return {
-    "A board index lists the board families you can install. Arduino's own index is always used.",
-    "Other makers publish their own index for their boards (for example the Raspberry Pi Pico or STM32 cores). "
-      .. "Paste its URL below to add their boards to the list.",
+    "Add a vendor by URL: board makers publish their boards as a board index, a URL that usually ends in "
+      .. "_index.json. Arduino's own index is always used.",
+    "Paste another maker's index URL below to add their boards to the list (for example the Raspberry Pi Pico "
+      .. "or STM32 cores). You can remove it again at any time.",
   }
 end
 

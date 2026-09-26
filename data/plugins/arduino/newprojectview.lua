@@ -182,7 +182,8 @@ end
 
 
 -- Families (platforms) of all vendors, installed or not:
--- { id, name, vendor, vendor_name, installed_version?, board_names, platform?, incomplete? }
+-- { id, name, vendor, vendor_name, installed_version?, board_names, platform?, incomplete?,
+--   deprecated?, deprecation? }
 function NewProjectView:get_families()
   local families, order = {}, {}
   for _, board in ipairs(self.boards or {}) do
@@ -199,11 +200,18 @@ function NewProjectView:get_families()
     local family = families[platform.id]
     if family then
       family.platform = platform
-    elseif not platform.deprecated then
+    else
       family = { id = platform.id, name = platform.name, vendor = platform.vendor, vendor_name = platform.vendor_name,
         installed_version = platform.installed_version, board_names = platform.board_names, platform = platform }
       families[platform.id] = family
       table.insert(order, family)
+    end
+    if platform.deprecated then
+      -- listed (dimmed, last) rather than hidden; the index puts the reason in the name
+      family.deprecated = true
+      local reason = family.name:match("^%[DEPRECATED%s*%-?%s*([^%]]*)%]")
+      family.deprecation = reason and reason ~= "" and reason or nil
+      family.name = family.name:gsub("^%[DEPRECATED[^%]]*%]%s*", "")
     end
   end
   for _, broken in ipairs(project.incomplete_installs()) do
@@ -220,19 +228,26 @@ function NewProjectView:get_step_items(step)
     for _, family in ipairs(self:get_families()) do
       local item = seen[family.vendor]
       if not item then
-        item = { key = family.vendor, label = family.vendor_name, count = 0, installed = false }
+        item = { key = family.vendor, label = family.vendor_name, count = 0, installed = false, deprecated = true }
         seen[family.vendor] = item
         table.insert(items, item)
       end
       item.count = item.count + #family.board_names
       item.installed = item.installed or family.installed_version ~= nil
+      -- a vendor counts as deprecated only when all its families are
+      item.deprecated = item.deprecated and family.deprecated == true
     end
     for _, item in ipairs(items) do
       item.note = count_boards(item.count)
       item.detail = item.installed and "installed" or "not installed"
+      if item.deprecated then
+        item.detail = item.installed and "installed, deprecated" or "deprecated"
+        item.color = style.dim
+      end
     end
     table.sort(items, function(a, b)
-      -- Arduino first, since it is what most people start with, then installed ones
+      -- Arduino first, since it is what most people start with, then installed ones; deprecated last
+      if a.deprecated ~= b.deprecated then return not a.deprecated end
       if (a.key == "arduino") ~= (b.key == "arduino") then return a.key == "arduino" end
       if a.installed ~= b.installed then return a.installed end
       return a.label:lower() < b.label:lower()
@@ -241,19 +256,23 @@ function NewProjectView:get_step_items(step)
     for _, family in ipairs(self:get_families()) do
       if family.vendor == self.choice[1] then
         local detail = family.installed_version and ("installed " .. family.installed_version) or "not installed"
+        if family.deprecated then detail = detail .. ", deprecated" end
         if family.incomplete then detail = "half installed - needs repair" end
         table.insert(items, {
           key = family.id,
           label = family.name,
-          note = InstallPanel.examples(family.board_names),
+          note = family.deprecated and family.deprecation or InstallPanel.examples(family.board_names),
           detail = detail,
+          color = family.deprecated and style.dim or nil,
           detail_color = family.incomplete and style.error or nil,
           installed = family.installed_version ~= nil and not family.incomplete,
+          deprecated = family.deprecated == true,
           family = family,
         })
       end
     end
     table.sort(items, function(a, b)
+      if a.deprecated ~= b.deprecated then return not a.deprecated end
       if a.installed ~= b.installed then return a.installed end
       return a.label:lower() < b.label:lower()
     end)
@@ -703,11 +722,15 @@ function NewProjectView:layout()
     L.tools_y = y
     local right = L.x + L.w
     L.tools = {}
-    for _, tool in ipairs({
-      { id = "tool:indexes", text = "Board Indexes...", run = function() self:open_panel(IndexesPanel.new(self)) end },
-      { id = "tool:refresh", text = "Refresh", run = function() self:refresh_index() end,
-        enabled = self.index.state ~= "updating" },
-    }) do
+    local tools = {}
+    if self.step == 1 then
+      -- a new board index adds new vendors, so it belongs where vendors are chosen
+      table.insert(tools, { id = "tool:indexes", text = "Add Vendor by URL...",
+        run = function() self:open_panel(IndexesPanel.new(self)) end })
+    end
+    table.insert(tools, { id = "tool:refresh", text = "Refresh", run = function() self:refresh_index() end,
+      enabled = self.index.state ~= "updating" })
+    for _, tool in ipairs(tools) do
       local w = font:get_width(tool.text) + pad_x
       local link = { id = tool.id, text = tool.text, x = right - w, y = y, w = w, h = row_h, enabled = tool.enabled ~= false }
       if link.enabled then self:add_target(link.id, link.x, link.y, link.w, link.h, tool.run) end
@@ -800,6 +823,34 @@ function NewProjectView:layout_list(L, list, row_h)
   end
   L.more_below = #items >= self.first_row + self.visible_rows
   L.row_h = row_h
+
+  -- nothing matches: suggest why and what to do (vendor and architecture steps)
+  L.empty = nil
+  if #items == 0 and self.boards and not self.loading and self.filter ~= "" and self.step <= 2 then
+    local font = style.font
+    local pad_x = style.padding.x
+    local y = list.y + row_h
+    local x = L.x + pad_x + font:get_width("Not listed? ")
+    L.empty = { y = y, links = {} }
+    local actions = {}
+    if self.step == 2 then
+      table.insert(actions, { id = "empty:refresh", text = "Refresh the board list", run = function() self:refresh_index() end,
+        enabled = self.index.state ~= "updating" })
+    end
+    table.insert(actions, { id = "empty:indexes", text = "Add Vendor by URL...",
+      run = function() self:open_panel(IndexesPanel.new(self)) end })
+    for i, action in ipairs(actions) do
+      local w = font:get_width(action.text)
+      local link = { id = action.id, text = action.text, x = x, y = y, w = w, h = row_h, enabled = action.enabled ~= false }
+      if link.enabled then self:add_target(link.id, x, y, w, row_h, action.run) end
+      table.insert(L.empty.links, link)
+      x = x + w
+      if i < #actions then
+        link.separator = "  or  "
+        x = x + font:get_width(link.separator)
+      end
+    end
+  end
 end
 
 
@@ -956,7 +1007,20 @@ function NewProjectView:draw_list(L)
     common.draw_text(font, style.dim, "Loading boards... (the first time, arduino-cli also downloads its tools)",
       "left", L.x + pad_x, L.list.y, 0, L.row_h)
   elseif #self:get_list() == 0 and self.boards then
-    common.draw_text(font, style.dim, "Nothing matches \"" .. self.filter .. "\"", "left", L.x + pad_x, L.list.y, 0, L.row_h)
+    common.draw_text(font, style.dim, "Nothing matches \"" .. self.filter .. "\".", "left", L.x + pad_x, L.list.y, 0, L.row_h)
+  end
+  if L.empty then
+    common.draw_text(font, style.dim, "Not listed? ", "left", L.x + pad_x, L.empty.y, 0, L.row_h)
+    for _, link in ipairs(L.empty.links) do
+      if self.hovered_id == link.id and link.enabled then
+        renderer.draw_rect(link.x, link.y + L.row_h - math.max(1, SCALE), link.w, math.max(1, SCALE), style.accent)
+      end
+      local link_end = common.draw_text(font, link.enabled and style.accent or style.dim, link.text, "left",
+        link.x, link.y, 0, L.row_h)
+      if link.separator then
+        common.draw_text(font, style.dim, link.separator, "left", link_end, link.y, 0, L.row_h)
+      end
+    end
   end
   ui.draw_rows(L.rows, self.selected, self.hovered_id)
   if L.more_below then

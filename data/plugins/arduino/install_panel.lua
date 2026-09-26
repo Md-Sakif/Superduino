@@ -287,6 +287,10 @@ function InstallPanel:draw(rect)
   local version = platform.platform and platform.platform.latest_version or ""
   if s == "confirm" then
     W.paragraph(platform.name .. " is not installed yet", style.accent)
+    if platform.deprecated then
+      W.paragraph("This family is deprecated" .. (platform.deprecation and (": " .. platform.deprecation) or "")
+        .. ". It may not be updated anymore; a newer family may support your board.", style.warn)
+    end
     W.paragraph("Superduino can download and install it for you. Then you can choose your board.", style.text)
     local boards = examples(platform.board_names)
     if boards then W.paragraph("Boards in this family: " .. boards .. ".", style.dim) end
