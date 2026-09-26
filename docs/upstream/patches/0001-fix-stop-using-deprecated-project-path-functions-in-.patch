@@ -1,0 +1,155 @@
+From 7f18192f72447866c631045f13758c0c68525a05 Mon Sep 17 00:00:00 2001
+From: sakifu <pritom.mojumder.kuet@gmail.com>
+Date: Sat, 26 Sep 2026 22:09:16 +0600
+Subject: [PATCH 1/4] fix: stop using deprecated project path functions in core
+ commands and treeview
+
+Opening a file from the treeview, renaming, "Open File" and "Save As"
+still called `core.normalize_to_project_dir` and
+`core.project_absolute_path`, which are deprecated, so a "Used deprecated
+functionality" warning was shown the first time any of them ran.
+
+Each call now uses a local helper with the same behaviour, based on
+`core.root_project()` and the `Project` API.
+---
+ data/core/commands/core.lua | 21 ++++++++++++++++++---
+ data/core/commands/doc.lua  | 21 ++++++++++++++++++---
+ data/plugins/treeview.lua   | 11 +++++++++--
+ 3 files changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/data/core/commands/core.lua b/data/core/commands/core.lua
+index 5bcbd9b2..80e1eaae 100644
+--- a/data/core/commands/core.lua
++++ b/data/core/commands/core.lua
+@@ -1,5 +1,20 @@
+ local core = require "core"
+ local common = require "core.common"
++local Project = require "core.project"
++
++-- A path relative to the open project when it is inside it (what the deprecated
++-- core.normalize_to_project_dir did, without its warning).
++local function project_relative(path)
++  local project = core.root_project()
++  return project and project:normalize_path(path) or common.normalize_path(path)
++end
++
++-- An absolute path, relative ones taken from the open project (what the
++-- deprecated core.project_absolute_path did, without its warning).
++local function project_absolute(path)
++  local project = core.root_project()
++  return project and project:absolute_path(path) or Project.absolute_path(nil, common.normalize_path(path))
++end
+ local command = require "core.command"
+ local config = require "core.config"
+ local keymap = require "core.keymap"
+@@ -34,7 +49,7 @@ local function open_file(use_dialog)
+       if use_dialog then
+         default_text = dirname
+       else
+-        dirname = core.normalize_to_project_dir(dirname)
++        dirname = project_relative(dirname)
+         default_text = dirname == core.root_project().path and "" or common.home_encode(dirname) .. PATHSEP
+       end
+     end
+@@ -59,14 +74,14 @@ local function open_file(use_dialog)
+   core.command_view:enter("Open File", {
+     text = default_text,
+     submit = function(text)
+-      local filename = core.project_absolute_path(common.home_expand(text))
++      local filename = project_absolute(common.home_expand(text))
+       core.root_view:open_doc(core.open_doc(filename))
+     end,
+     suggest = function (text)
+       return common.home_encode_list(common.path_suggest(common.home_expand(text), core.root_project() and core.root_project().path))
+     end,
+     validate = function(text)
+-        local filename = core.project_absolute_path(common.home_expand(text))
++        local filename = project_absolute(common.home_expand(text))
+         local path_stat, err = system.get_file_info(filename)
+         if err then
+           if err:find("No such file", 1, true) then
+diff --git a/data/core/commands/doc.lua b/data/core/commands/doc.lua
+index 33ac6a66..28a8b12d 100644
+--- a/data/core/commands/doc.lua
++++ b/data/core/commands/doc.lua
+@@ -1,6 +1,21 @@
+ local core = require "core"
+ local command = require "core.command"
+ local common = require "core.common"
++local Project = require "core.project"
++
++-- A path relative to the open project when it is inside it (what the deprecated
++-- core.normalize_to_project_dir did, without its warning).
++local function project_relative(path)
++  local project = core.root_project()
++  return project and project:normalize_path(path) or common.normalize_path(path)
++end
++
++-- An absolute path, relative ones taken from the open project (what the
++-- deprecated core.project_absolute_path did, without its warning).
++local function project_absolute(path)
++  local project = core.root_project()
++  return project and project:absolute_path(path) or Project.absolute_path(nil, common.normalize_path(path))
++end
+ local config = require "core.config"
+ local translate = require "core.doc.translate"
+ local style = require "core.style"
+@@ -34,8 +49,8 @@ end
+ local function save(filename)
+   local abs_filename
+   if filename then
+-    filename = core.normalize_to_project_dir(filename)
+-    abs_filename = core.project_absolute_path(filename)
++    filename = project_relative(filename)
++    abs_filename = project_absolute(filename)
+   end
+   local ok, err = pcall(doc().save, doc(), filename, abs_filename)
+   if ok then
+@@ -582,7 +597,7 @@ local commands = {
+       text = dv.doc.filename
+     elseif last_doc and last_doc.filename then
+       local dirname, filename = core.last_active_view.doc.abs_filename:match("(.*)[/\\](.+)$")
+-      text = core.normalize_to_project_dir(dirname) .. PATHSEP
++      text = project_relative(dirname) .. PATHSEP
+       if text == core.root_project().path then text = "" end
+     end
+     core.command_view:enter("Save As", {
+diff --git a/data/plugins/treeview.lua b/data/plugins/treeview.lua
+index d4c5e465..cc03591f 100644
+--- a/data/plugins/treeview.lua
++++ b/data/plugins/treeview.lua
+@@ -1,6 +1,13 @@
+ -- mod-version:4
+ local core = require "core"
+ local common = require "core.common"
++
++-- A path relative to the open project when it is inside it (what the deprecated
++-- core.normalize_to_project_dir did, without its warning).
++local function project_relative(path)
++  local project = core.root_project()
++  return project and project:normalize_path(path) or common.normalize_path(path)
++end
+ local command = require "core.command"
+ local config = require "core.config"
+ local keymap = require "core.keymap"
+@@ -658,7 +665,7 @@ end, {
+   end,
+ 
+   ["treeview:rename"] = function(item)
+-    local old_filename = core.normalize_to_project_dir(item.abs_filename)
++    local old_filename = project_relative(item.abs_filename)
+     local old_abs_filename = item.abs_filename
+     core.command_view:enter("Rename", {
+       text = old_filename,
+@@ -750,7 +757,7 @@ command.add(TreeView, {
+         if core.last_active_view and core.active_view == view then
+           core.set_active_view(core.last_active_view)
+         end
+-        view:open_doc(core.normalize_to_project_dir(item.abs_filename))
++        view:open_doc(project_relative(item.abs_filename))
+       end)
+     end
+   end,
+-- 
+2.47.3
+

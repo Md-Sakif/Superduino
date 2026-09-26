@@ -1,0 +1,27 @@
+From 697a28645356a201a56331b1465bcd343f219970 Mon Sep 17 00:00:00 2001
+From: sakifu <pritom.mojumder.kuet@gmail.com>
+Date: Sat, 26 Sep 2026 22:09:16 +0600
+Subject: [PATCH 2/4] fix(autoreload): require core.style for the reload prompt
+
+`check_prompt_reload` uses `style.font` but the plugin never required
+`core.style`, so the "File Changed ... Reload this file?" prompt raised
+an error instead of showing whenever a changed file had unsaved edits.
+---
+ data/plugins/autoreload.lua | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/data/plugins/autoreload.lua b/data/plugins/autoreload.lua
+index 49ef9923..57356eee 100644
+--- a/data/plugins/autoreload.lua
++++ b/data/plugins/autoreload.lua
+@@ -4,6 +4,7 @@ local config = require "core.config"
+ local Doc = require "core.doc"
+ local Node = require "core.node"
+ local common = require "core.common"
++local style = require "core.style"
+ local dirwatch = require "core.dirwatch"
+ 
+ config.plugins.autoreload = common.merge({
+-- 
+2.47.3
+

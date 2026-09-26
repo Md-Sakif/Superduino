@@ -1,0 +1,87 @@
+From 948ff0fd0277994e2d75ebceb7318f253532641a Mon Sep 17 00:00:00 2001
+From: sakifu <pritom.mojumder.kuet@gmail.com>
+Date: Sat, 26 Sep 2026 22:09:16 +0600
+Subject: [PATCH 4/4] fix(autoreload): reload files that changed while their
+ tab was hidden
+
+Only files in visible tabs are watched, and nothing was checked when a
+tab became visible again, so a file changed on disk while its tab was
+behind another one kept showing the old content (until it changed yet
+again while visible).
+
+When a tab is shown, its file time is now compared with the one it was
+loaded with: an unchanged doc is reloaded, one with unsaved edits asks
+first. Answering "No" keeps the edits and records the file time, so the
+question is not repeated until the file changes again.
+---
+ data/plugins/autoreload.lua | 38 ++++++++++++++++++++++++-------------
+ 1 file changed, 25 insertions(+), 13 deletions(-)
+
+diff --git a/data/plugins/autoreload.lua b/data/plugins/autoreload.lua
+index b8260ac4..dce1e6b4 100644
+--- a/data/plugins/autoreload.lua
++++ b/data/plugins/autoreload.lua
+@@ -71,17 +71,39 @@ local function check_prompt_reload(doc)
+       { font = style.font, text = "Yes", default_yes = true },
+       { font = style.font, text = "No" , default_no = true }
+     }, function(item)
+-      if item.text == "Yes" then reload_doc(doc) end
++      if item.text == "Yes" then
++        reload_doc(doc)
++      else
++        -- keep the edits; ask again only when the file changes again
++        update_time(doc)
++      end
+       doc.deferred_reload = false
+     end)
+   end
+ end
+ 
++-- Reloads a doc whose file changed on disk, or asks first when it has unsaved
++-- changes (right away when `shown`, or when the doc is the active one).
++local function check_changed(doc, shown)
++  local info = system.get_file_info(doc.abs_filename or "")
++  if info and times[doc] ~= info.modified then
++    if not doc:is_dirty() and not config.plugins.autoreload.always_show_nagview then
++      reload_doc(doc)
++    else
++      doc.deferred_reload = true
++      if shown or doc == core.active_view.doc then check_prompt_reload(doc) end
++    end
++  elseif shown then
++    check_prompt_reload(doc)
++  end
++end
++
+ local function doc_changes_visiblity(doc, visibility)
+   if doc and visible[doc] ~= visibility and doc.abs_filename then
+     visible[doc] = visibility
+-    if visibility then check_prompt_reload(doc) end
+     watch:watch(doc.abs_filename, visibility)
++    -- hidden docs are not watched: catch changes made while it was hidden
++    if visibility then check_changed(doc, true) end
+   end
+ end
+ 
+@@ -102,17 +124,7 @@ core.add_thread(function()
+   while true do
+     watch:check(function(file)
+       for i, doc in ipairs(core.docs) do
+-        if doc.abs_filename == file then
+-          local info = system.get_file_info(doc.abs_filename or "")
+-          if info and times[doc] ~= info.modified then
+-            if not doc:is_dirty() and not config.plugins.autoreload.always_show_nagview then
+-              reload_doc(doc)
+-            else
+-              doc.deferred_reload = true
+-              if doc == core.active_view.doc then check_prompt_reload(doc) end
+-            end
+-          end
+-        end
++        if doc.abs_filename == file then check_changed(doc) end
+       end
+     end)
+     coroutine.yield(0.05)
+-- 
+2.47.3
+
