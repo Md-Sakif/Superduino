@@ -77,6 +77,18 @@ return {
     T.eq(v:get_fqbn(), "esp32:esp32:esp32:PartitionScheme=huge_app,PSRAM=enabled", "fqbn has the changed settings")
     T.shot("options")
 
+    -- a short page: "more below..." gets its own line under the last row
+    local height = v.size.y
+    v.size.y = 330 * SCALE
+    v:layout()
+    local L = v.current_layout
+    local last = L.rows[#L.rows]
+    T.check(L.more_below, "not all settings fit")
+    T.check(last and L.more_y >= last.y + last.h, "the hint is below the last row")
+    T.check(L.more_y + L.row_h <= L.list.y + L.list.h + 1, "and inside the list area")
+    v.size.y = height
+    v:layout()
+
     -- Reset to Defaults, then a click opens a setting's values
     click(tool("tool:reset-options"))
     T.eq(v:get_fqbn(), "esp32:esp32:esp32", "reset restores the defaults")

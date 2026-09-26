@@ -224,7 +224,9 @@ def update_index(state):
 def progress(item, total_kib):
     for step in range(0, 101, 25):
         done = total_kib * step / 100
-        sys.stdout.write("\r%s %.2f KiB / %.2f KiB   %.2f%% 00m0%ds" % (item, done, total_kib, step, (100 - step) // 25))
+        # the text bar arduino-cli adds when it can reach a terminal, as when Superduino is started from one
+        bar = "[" + "=" * (step // 10) + ">" + "-" * (10 - step // 10) + "]"
+        sys.stdout.write("\r%s %.2f KiB / %.2f KiB %s  %.2f%% 00m0%ds" % (item, done, total_kib, bar, step, (100 - step) // 25))
         sys.stdout.flush()
         time.sleep(0.03)
     sys.stdout.write("\r%s downloaded\n" % item)

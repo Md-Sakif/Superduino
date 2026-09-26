@@ -998,8 +998,10 @@ end
 
 function NewProjectView:layout_list(L, list, row_h)
   L.list = list
-  self.visible_rows = math.max(1, math.floor(list.h / row_h))
   local items = self:get_list()
+  local fits = math.max(1, math.floor(list.h / row_h))
+  -- when not all rows fit, the last line is kept for the "more below..." hint
+  self.visible_rows = #items > fits and math.max(1, fits - 1) or fits
   self.first_row = common.clamp(self.first_row, 1, math.max(1, #items - self.visible_rows + 1))
   L.rows = {}
   for i = self.first_row, math.min(#items, self.first_row + self.visible_rows - 1) do
@@ -1017,6 +1019,7 @@ function NewProjectView:layout_list(L, list, row_h)
     end)
   end
   L.more_below = #items >= self.first_row + self.visible_rows
+  L.more_y = list.y + self.visible_rows * row_h
   L.row_h = row_h
 
   -- nothing matches: suggest why and what to do (vendor and architecture steps)
@@ -1237,7 +1240,7 @@ function NewProjectView:draw_options(L)
   end
   ui.draw_rows(L.rows, self.selected, self.hovered_id)
   if L.more_below then
-    common.draw_text(font, style.dim, "more below...", "right", L.x, L.list.y + L.list.h - L.row_h / 2, L.w - pad_x, L.row_h / 2)
+    common.draw_text(font, style.dim, "more below...", "right", L.x, L.more_y, L.w - pad_x, L.row_h)
   end
 end
 
@@ -1266,7 +1269,7 @@ function NewProjectView:draw_list(L)
   end
   ui.draw_rows(L.rows, self.selected, self.hovered_id)
   if L.more_below then
-    common.draw_text(font, style.dim, "more below...", "right", L.x, L.list.y + L.list.h - L.row_h / 2, L.w - pad_x, L.row_h / 2)
+    common.draw_text(font, style.dim, "more below...", "right", L.x, L.more_y, L.w - pad_x, L.row_h)
   end
 end
 

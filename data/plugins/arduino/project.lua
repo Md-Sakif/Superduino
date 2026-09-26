@@ -191,14 +191,18 @@ end
 
 -- Turns one line of `arduino-cli core install` output into an event.
 local function parse_install_line(line)
-  line = line:gsub("%s+$", "")
+  -- when arduino-cli can reach a terminal (Superduino was started from one) it
+  -- adds a text bar, "704 KiB / 2.92 MiB [====>----]  23.55%"; the page draws its own
+  line = line:gsub("%s*%[[=>%-]*%]", ""):gsub("%s+$", "")
   if line == "" or line:find("^Skipping .* configuration") then return end
   local item, done, total, percent, eta = line:match("^(%S+) (.-) / (.-)%s+([%d%.]+)%%%s*(%S*)$")
   if item then
     return { kind = "progress", item = item, done = done, total = total,
       percent = tonumber(percent), eta = eta ~= "" and eta or nil }
   end
-  item = line:match("^(%S+) already downloaded$") or line:match("^(%S+) downloaded$")
+  -- tools print their name twice: "esp32:esp-rv32@2601 esp32:esp-rv32@2601 already downloaded"
+  item = line:match("^(%S+) already downloaded$") or line:match("^(%S+) %S+ already downloaded$")
+    or line:match("^(%S+) downloaded$")
   if item then return { kind = "downloaded", item = item } end
   item = line:match("^Installing platform (%S+)%.%.%.$") or line:match("^Installing (%S+)%.%.%.$")
   if item then return { kind = "installing", item = item } end
