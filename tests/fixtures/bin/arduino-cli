@@ -375,10 +375,22 @@ def main(argv):
         version = state["installed"].get(pid)
         if not version:
             fail("Error initializing the project file: Platform '%s' not found: platform not installed" % pid)
-        with open(os.path.join(path, "sketch.yaml"), "w") as fp:
-            fp.write("profiles:\n  %s:\n    fqbn: %s\n    platforms:\n      - platform: %s (%s)\n\n"
-                     "default_profile: %s\n" % (profile, fqbn, pid, version, profile))
-        out({"project_path": os.path.join(path, "sketch.yaml")})
+        yaml_path = os.path.join(path, "sketch.yaml")
+        text = open(yaml_path).read() if os.path.exists(yaml_path) else "profiles:\n"
+        if ("\n  %s:\n" % profile) in text:
+            fail("Error initializing the project file: Profile '%s' already exists" % profile)
+        block = "  %s:\n    fqbn: %s\n    platforms:\n      - platform: %s (%s)\n" % (profile, fqbn, pid, version)
+        if not pid.startswith("arduino:"):
+            # like the real one for platforms from another board index
+            block += "        platform_index_url: https://example.com/package_%s_index.json\n" % pid.split(":")[0]
+        head, _, default = text.partition("default_profile:")
+        head = head.rstrip("\n") + "\n" + ("\n" if head.strip() != "profiles:" else "") + block
+        default = default.strip()
+        if "--set-default" in args or not default:
+            default = profile
+        with open(yaml_path, "w") as fp:
+            fp.write(head + "\ndefault_profile: %s\n" % default)
+        out({"project_path": yaml_path})
     elif cmd == ["lib", "examples"]:
         fqbn = args[args.index("--fqbn") + 1] if "--fqbn" in args else ""
         pid = ":".join(fqbn.split(":")[:2])

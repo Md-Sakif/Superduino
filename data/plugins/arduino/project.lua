@@ -3,6 +3,7 @@ local core = require "core"
 local common = require "core.common"
 local storage = require "core.storage"
 local cli = require "plugins.arduino.cli"
+local sketch_yaml = require "plugins.arduino.sketch_yaml"
 
 local project = {}
 
@@ -591,6 +592,134 @@ function project.create(path, board, template, fqbn)
     core.log("Created project %s for %s", name, board.name)
   end
   return true
+end
+
+
+-------------------------------------------------------------------------------
+-- The board of an existing sketch (its build profile in sketch.yaml)
+-------------------------------------------------------------------------------
+
+---Splits an fqbn into the board's fqbn and its settings:
+---"esp32:esp32:esp32:PSRAM=enabled" -> "esp32:esp32:esp32", { PSRAM = "enabled" }
+---@param fqbn string
+---@return string board_fqbn
+---@return table<string, string> options
+function project.split_fqbn(fqbn)
+  local base, rest = fqbn:match("^([^:]+:[^:]+:[^:]+):(.*)$")
+  local options = {}
+  for pair in (rest or ""):gmatch("[^,]+") do
+    local key, value = pair:match("^([^=]+)=(.*)$")
+    if key then options[key] = value end
+  end
+  return base or fqbn, options
+end
+
+
+---Whether a folder is an Arduino sketch: it has <folder name>.ino (or a sketch.yaml).
+---@param dir string
+function project.is_sketch(dir)
+  local name = common.basename(dir)
+  return system.get_file_info(dir .. PATHSEP .. name .. ".ino") ~= nil
+    or system.get_file_info(dir .. PATHSEP .. name .. ".pde") ~= nil
+    or project.sketch_file(dir) ~= nil
+end
+
+
+---The sketch project file of a sketch folder, if it has one.
+---@param dir string
+---@return string?
+function project.sketch_file(dir)
+  for _, name in ipairs({ "sketch.yaml", "sketch.yml" }) do
+    local path = dir .. PATHSEP .. name
+    if system.get_file_info(path) then return path end
+  end
+end
+
+
+---Reads the build profiles of a sketch folder.
+---@param dir string
+---@return { path: string?, file: arduino.sketch_file?, profile: arduino.sketch_profile? }? sketch
+---`profile` is the default one; `path` and `file` are nil when there is no sketch.yaml.
+---@return string? error
+function project.read_sketch(dir)
+  local path = project.sketch_file(dir)
+  if not path then return {} end
+  local fp, err = io.open(path, "rb")
+  if not fp then return nil, err end
+  local text = fp:read("a")
+  fp:close()
+  local file = sketch_yaml.parse(text)
+  return { path = path, file = file, profile = sketch_yaml.default_profile(file) }
+end
+
+
+-- The platforms list arduino-cli writes for a board, taken from a profile it
+-- creates in a temporary sketch (it adds e.g. platform_index_url when needed).
+local function platform_lines_for(fqbn)
+  local tmp = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp") .. PATHSEP
+    .. string.format("superduino-profile-%d-%d", os.time(), math.random(1, 1e6))
+  local sketch = tmp .. PATHSEP .. "Profile"
+  local function done(...)
+    common.rm(tmp, true)
+    return ...
+  end
+  local _, err = cli.run_json({ "sketch", "new", sketch })
+  if err then return done(nil, err) end
+  _, err = cli.run_json({ "profile", "create", "--profile", "tmp", "--fqbn", fqbn, sketch })
+  if err then return done(nil, err) end
+  local fp = io.open(sketch .. PATHSEP .. "sketch.yaml", "rb")
+  if not fp then return done(nil, "arduino-cli did not write a profile") end
+  local file = sketch_yaml.parse(fp:read("a"))
+  fp:close()
+  local profile = sketch_yaml.profile(file, "tmp")
+  local lines = profile and sketch_yaml.platform_lines(file, profile)
+  if not lines then return done(nil, "arduino-cli wrote a profile without platforms") end
+  return done(lines)
+end
+
+
+---Sets the board (with its settings) of a sketch's default profile.
+---Changing only settings keeps the platform version the profile pins; a board
+---of another family also gets that family's platforms. A profile named after the
+---old board (as Superduino names them) is renamed after the new one. Without a
+---sketch.yaml, a profile is created.
+---Must be called from a thread (see `core.add_thread`).
+---@param dir string Sketch folder
+---@param fqbn string e.g. "esp32:esp32:esp32:PSRAM=enabled"
+---@return string? profile Name of the profile that was saved, nil on failure
+---@return string? error
+function project.save_board(dir, fqbn)
+  local sketch, err = project.read_sketch(dir)
+  if not sketch then return nil, err end
+  local base = project.split_fqbn(fqbn)
+  local profile = sketch.profile
+  if not profile then
+    -- no profile yet: let arduino-cli create one
+    local name = project.profile_name(base)
+    local _, create_err = cli.run_json({ "profile", "create", "--profile", name, "--fqbn", fqbn, "--set-default", dir })
+    if create_err then return nil, create_err end
+    return name
+  end
+
+  local change = { fqbn = fqbn }
+  local old_base = profile.fqbn and project.split_fqbn(profile.fqbn)
+  local function platform_of(board) return board and board:match("^([^:]+:[^:]+)") end
+  if platform_of(old_base) ~= platform_of(base) or not profile.platforms_line then
+    local lines, lines_err = platform_lines_for(fqbn)
+    if not lines then return nil, lines_err end
+    change.platform_lines = lines
+  end
+  if old_base and old_base ~= base and profile.name == project.profile_name(old_base) then
+    local new_name = project.profile_name(base)
+    if not sketch_yaml.profile(sketch.file, new_name) then change.rename = new_name end
+  end
+
+  local text = sketch_yaml.update(sketch.file, profile.name, change)
+  local fp, write_err = io.open(sketch.path, "wb")
+  if not fp then return nil, write_err end
+  fp:write(text)
+  fp:close()
+  return change.rename or profile.name
 end
 
 

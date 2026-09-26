@@ -1,5 +1,6 @@
 -- Step-by-step "New Project" page: vendor, architecture, board, the board's
--- settings, then a name. Panels (install/repair, board indexes, a setting's
+-- settings, then a name. The same page, without the name step, is the Board
+-- Settings page of an existing sketch (see `NewProjectView.open_edit`). Panels (install/repair, board indexes, a setting's
 -- values, templates) temporarily replace the list or name area; see
 -- install_panel.lua, indexes_panel.lua, option_panel.lua, templates_panel.lua.
 local core = require "core"
@@ -24,8 +25,8 @@ local NewProjectView = View:extend()
 
 function NewProjectView:__tostring() return "NewProjectView" end
 
--- Not restored with the session: opening a new project restarts the editor,
--- which would bring the page back.
+-- Not restored with the session: opening a new project restarts the editor, and
+-- a Board Settings page belongs to the sketch it was opened for.
 NewProjectView.save_in_workspace = false
 
 local STEPS = {
@@ -58,18 +59,33 @@ local STEPS = {
 local OPTIONS_STEP = 4
 local NAME_STEP = #STEPS
 
+-- Board Settings of an existing sketch: the same steps, without the name
+local EDIT_STEPS = {}
+for i = 1, OPTIONS_STEP - 1 do EDIT_STEPS[i] = STEPS[i] end
+EDIT_STEPS[OPTIONS_STEP] = {
+  title = "Options",
+  question = "Adjust the board's settings",
+  hint = "Saved to the sketch's build profile (sketch.yaml). To use another board, click a step above.",
+}
+
 local LIST_PLACEHOLDER = "Type to search..."
 local NAME_PLACEHOLDER = "MyProject"
 local KEYS_HINT = "Enter: continue    Esc: go back"
 local OPTIONS_KEYS_HINT = "←/→: change    Space: all choices    Enter: continue"
+local EDIT_KEYS_HINT = "←/→: change    Space: all choices    "
 
 
 ---@type arduino.newprojectview?
 local open_view
+-- Board Settings pages by sketch folder
+local edit_views = {}
 
 
-function NewProjectView:new()
+---@param options? { edit?: { dir: string, sketch: table } } `edit`: the Board Settings
+---page of the sketch in `dir` (`sketch` as returned by `project.read_sketch`).
+function NewProjectView:new(options)
   NewProjectView.super.new(self)
+  self.edit = options and options.edit
   self.step = 1
   self.choice = {} -- selected key for each list step
   self.filter = ""
@@ -96,7 +112,12 @@ end
 
 
 function NewProjectView:get_name()
-  return "New Project"
+  return self.edit and ("Board: " .. common.basename(self.edit.dir)) or "New Project"
+end
+
+
+function NewProjectView:steps()
+  return self.edit and EDIT_STEPS or STEPS
 end
 
 
@@ -110,6 +131,7 @@ end
 function NewProjectView:try_close(do_close)
   if self.panel and self.panel.on_close then self.panel:on_close() end
   if open_view == self then open_view = nil end
+  if self.edit and edit_views[self.edit.dir] == self then edit_views[self.edit.dir] = nil end
   NewProjectView.super.try_close(self, do_close)
 end
 
@@ -146,9 +168,12 @@ function NewProjectView:load()
     self.loading = false
     if not ok then
       self.load_error = err
+    elseif self.edit and not self.edit.started then
+      self:start_edit()
     else
       self:enter_step(self.step)
-      self:refresh_index()
+      -- Board Settings keep the board list as it is unless Refresh is used
+      if not self.edit then self:refresh_index() end
     end
     core.redraw = true
   end)
@@ -473,6 +498,8 @@ end
 ---Loads the settings of the chosen board in the background.
 ---@param skip_if_none? boolean Go on to the name step when the board has no settings
 function NewProjectView:load_options(skip_if_none)
+  -- Board Settings end with the options step, even without options
+  if self.edit then skip_if_none = false end
   local board = self:get_board()
   if not board then return end
   local state = self.board_options
@@ -490,6 +517,12 @@ function NewProjectView:load_options(skip_if_none)
   core.add_thread(function()
     local options, err = project.load_board_options(board.fqbn)
     state.loading, state.options, state.error = false, options, err
+    if options and self.board_options == state then
+      -- settings read from a sketch may name the default value; that is no change
+      for _, option in ipairs(options) do
+        if self.option_choice[option.option] == option.default then self.option_choice[option.option] = nil end
+      end
+    end
     if err then core.warn("Could not load the settings of %s: %s", board.name, err) end
     if self.board_options == state and state.skip and options and #options == 0
       and self.step == OPTIONS_STEP and not self.panel then
@@ -510,6 +543,73 @@ end
 function NewProjectView:retry_options()
   self.board_options = nil
   self:load_options()
+end
+
+
+-------------------------------------------------------------------------------
+-- Board Settings of an existing sketch
+-------------------------------------------------------------------------------
+
+-- Starts with the sketch's board and settings chosen, on the options step (or
+-- the step asked for by `open_edit`).
+function NewProjectView:start_edit()
+  local edit = self.edit
+  edit.started = true
+  local fqbn = edit.sketch.profile and edit.sketch.profile.fqbn
+  if not fqbn then
+    self:enter_step(1)
+    return
+  end
+  local base, options = project.split_fqbn(fqbn)
+  local vendor, arch = base:match("^([^:]+):([^:]+):")
+  self.choice[1], self.choice[2] = vendor, vendor and (vendor .. ":" .. arch)
+  for _, board in ipairs(self.boards or {}) do
+    if board.fqbn == base then
+      self.choice[3], self.option_choice = base, options
+      self:enter_step(edit.start_step or OPTIONS_STEP)
+      return
+    end
+  end
+  -- e.g. a sketch made on another computer
+  self:enter_step(self.choice[2] and 2 or 1)
+  self:set_message("The board " .. base .. " is not installed on this computer. Install its family, "
+    .. "or choose another board.", true)
+end
+
+
+---Whether the chosen board or settings differ from what sketch.yaml has.
+function NewProjectView:board_changed()
+  local profile = self.edit.sketch.profile
+  return not (profile and profile.fqbn) or self:get_fqbn() ~= profile.fqbn
+end
+
+
+---Writes the chosen board to sketch.yaml ("Apply"), then closes the page when `close`.
+function NewProjectView:save_board(close)
+  local fqbn = self:get_fqbn()
+  if not fqbn or self.creating then return end
+  local function finish()
+    if not close then return end
+    local node = core.root_view.root_node:get_node_for_view(self)
+    if node then node:close_view(core.root_view.root_node, self) end
+  end
+  if not self:board_changed() then return finish() end
+  self.creating = true
+  self:set_message("Saving...", false)
+  core.add_thread(function()
+    local name, err = project.save_board(self.edit.dir, fqbn)
+    self.creating = false
+    if not name then
+      local explanation = cli.explain_error(err)
+      self:set_message("Could not save the board: " .. (explanation and (explanation .. " ") or "") .. tostring(err), true)
+      return
+    end
+    core.log("%s now uses %s (profile %s)", common.basename(self.edit.dir), fqbn, name)
+    -- what is saved now (the profile may have been renamed or created)
+    self.edit.sketch = project.read_sketch(self.edit.dir) or self.edit.sketch
+    self:set_message("Saved to " .. common.basename(self.edit.sketch.path or "sketch.yaml") .. ".", false)
+    finish()
+  end)
 end
 
 
@@ -585,6 +685,10 @@ function NewProjectView:next()
   if self.step == OPTIONS_STEP then
     local state = self.board_options
     if state and state.loading then return end
+    if self.edit then
+      self:save_board(true)
+      return
+    end
     -- also when the settings could not be loaded: the board's defaults are used
     self.choice[OPTIONS_STEP] = "done"
     self.message = nil
@@ -841,13 +945,31 @@ function NewProjectView:page_buttons()
       hint = "Enter: try again" }
   end
   local has_options = self.step == OPTIONS_STEP and #self:get_list() > 0
-  local buttons = { hint = has_options and OPTIONS_KEYS_HINT or KEYS_HINT }
+  local hint = KEYS_HINT
+  local enter = self.edit and (self:board_changed() and "Enter: apply and close" or "Enter: close")
+  if has_options then
+    hint = self.edit and (EDIT_KEYS_HINT .. enter) or OPTIONS_KEYS_HINT
+  elseif self.edit and self.step == OPTIONS_STEP then
+    hint = enter .. "    Esc: go back"
+  end
+  local buttons = { hint = hint }
   if self.step > 1 then buttons.back = { text = "←  Back", run = function() self:back() end } end
   if self.step == NAME_STEP then
     buttons.next = { text = "Create Project", run = function() self:next() end }
   elseif self.step == OPTIONS_STEP then
     local state = self.board_options
-    buttons.next = { text = "Next  →", run = function() self:next() end, enabled = not (state and state.loading) }
+    local ready = not (state and state.loading)
+    if self.edit then
+      -- only Close until something differs from sketch.yaml
+      local changed = self:board_changed()
+      buttons.next = { text = changed and "Apply and Close" or "Close", run = function() self:save_board(true) end,
+        enabled = ready }
+      if changed then
+        buttons.extra = { text = "Apply", run = function() self:save_board(false) end, enabled = ready }
+      end
+    else
+      buttons.next = { text = "Next  →", run = function() self:next() end, enabled = ready }
+    end
   else
     buttons.next = { text = "Next  →", run = function() self:next() end,
       enabled = self:get_list()[self.selected] ~= nil }
@@ -879,7 +1001,7 @@ function NewProjectView:layout()
   -- step bar: completed steps show the choice and can be clicked to go back
   L.crumbs = {}
   local x = L.x
-  for i, step in ipairs(STEPS) do
+  for i, step in ipairs(self:steps()) do
     local text = (i < self.step and i < NAME_STEP and self.choice[i] and self:choice_label(i)) or step.title
     local w = font:get_width(text)
     local crumb = { text = text, x = x, y = y, w = w, h = row_h, index = i }
@@ -1097,12 +1219,18 @@ function NewProjectView:draw()
   if not L then return end
   local font = style.font
   local pad_x, pad_y = style.padding.x, style.padding.y
-  local step = STEPS[self.step]
+  local steps = self:steps()
+  local step = steps[self.step]
   local heading = ui.heading_font()
 
-  common.draw_text(heading, style.text, "New Project", "left", L.x, L.title_y, 0, heading:get_height())
-  common.draw_text(font, style.dim, string.format("Step %d of %d", self.step, #STEPS), "right",
-    L.x, L.title_y, L.w, heading:get_height())
+  common.draw_text(heading, style.text, self.edit and "Board Settings" or "New Project", "left", L.x, L.title_y, 0,
+    heading:get_height())
+  local corner = string.format("Step %d of %d", self.step, #steps)
+  if self.edit then
+    local profile = self.edit.sketch.profile
+    corner = common.basename(self.edit.dir) .. (profile and ("  ·  profile " .. profile.name) or "  ·  no build profile yet")
+  end
+  common.draw_text(font, style.dim, corner, "right", L.x, L.title_y, L.w, heading:get_height())
 
   for i, crumb in ipairs(L.crumbs) do
     local color = style.dim
@@ -1363,6 +1491,31 @@ function NewProjectView.open(options)
     view:open_panel(InstallPanel.new(view, { id = options.repair, name = name, vendor_name = vendor,
       board_names = {} }, "repair"))
   end
+  return view
+end
+
+
+---Opens the Board Settings page of a sketch, or focuses it when it is already open.
+---@param dir string Sketch folder
+---@param step? integer 1 vendor, 2 family, 3 board, 4 options (the default)
+function NewProjectView.open_edit(dir, step)
+  local view = edit_views[dir]
+  local node = view and core.root_view.root_node:get_node_for_view(view)
+  if node then
+    node:set_active_view(view)
+    if step and view.edit.started and not view.panel and not view.creating and view:can_go_to(step) then
+      view:enter_step(step)
+    end
+    return view
+  end
+  local sketch, err = project.read_sketch(dir)
+  if not sketch then
+    core.error("Could not read the build profile of %s: %s", dir, tostring(err))
+    return
+  end
+  view = NewProjectView({ edit = { dir = dir, sketch = sketch, start_step = step } })
+  edit_views[dir] = view
+  core.root_view:get_active_node_default():add_view(view)
   return view
 end
 

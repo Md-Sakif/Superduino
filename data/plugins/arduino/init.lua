@@ -10,6 +10,7 @@ local project = require "plugins.arduino.project"
 local NewProjectView = require "plugins.arduino.newprojectview"
 local access = require "plugins.arduino.access"
 local managed = require "plugins.arduino.managed_cli"
+local BoardPanel = require "plugins.arduino.board_panel"
 require "plugins.arduino.access_ui"
 
 
@@ -60,6 +61,18 @@ local function locate(use_dialog)
     end,
   })
 end
+
+
+-- the open project is an Arduino sketch
+command.add(function() return BoardPanel.current() ~= nil end, {
+  ["arduino:board-settings"] = function()
+    if cli.status ~= "ok" then
+      core.error("arduino-cli is not available; see the Arduino CLI section on the welcome screen")
+      return
+    end
+    NewProjectView.open_edit(core.root_project().path)
+  end,
+})
 
 
 command.add(nil, {
@@ -234,6 +247,7 @@ EmptyView.add_section({
 })
 
 
+BoardPanel.dock()
 table.insert(cli.on_checked, access.refresh)
 cli.init()
 project.open_pending()
