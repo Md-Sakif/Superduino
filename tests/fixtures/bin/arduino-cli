@@ -56,7 +56,11 @@ DEFAULT_STATE = {
     },
     # archive sizes in bytes written to package_index.json: [platform, its <arch>-gcc tool]
     "sizes": {"esp32:esp32": [31000000, 681000000], "arduino:samd": [2920000, 95230000]},
-    "details_fail": False,     # `board details` fails (e.g. a broken boards.txt)
+    "details_fail": False,
+    # connected boards for `board list`: {address, label, protocol, protocol_label, boards: [[name, fqbn]]}
+    "ports": [],
+    "compile_slow": False,     # compiling takes long (for cancel tests)
+    "upload_denied": False,    # opening the port fails with "Permission denied"     # `board details` fails (e.g. a broken boards.txt)
     # board settings (menus) returned by `board details`, keyed by fqbn; the first value is the default
     "board_options": {
         "arduino:avr:nano": [
@@ -269,6 +273,81 @@ def core_install(state, pid):
     print("Platform %s installed" % item)
 
 
+def port_json(port):
+    return {"matching_boards": [{"name": n, "fqbn": f} for n, f in port.get("boards", [])],
+            "port": {"address": port["address"], "label": port.get("label", port["address"]),
+                     "protocol": port.get("protocol", "serial"),
+                     "protocol_label": port.get("protocol_label", "Serial Port (USB)"),
+                     "properties": {"pid": "0x0043", "vid": "0x2341"}, "hardware_id": ""}}
+
+
+def board_list_watch():
+    """Like `board list --watch --json`: an event per change, as pretty JSON objects."""
+    known = {}
+    while True:
+        current = {p["address"]: p for p in load_state()["ports"]}
+        for address in list(known):
+            if address not in current:
+                event = dict(port_json(known.pop(address)), eventType="remove")
+                event.pop("matching_boards")
+                sys.stdout.write(json.dumps(event, indent=2) + "\n")
+        for address, port in current.items():
+            if address not in known:
+                known[address] = port
+                sys.stdout.write(json.dumps(dict(port_json(port), eventType="add"), indent=2) + "\n")
+        sys.stdout.flush()
+        time.sleep(0.1)
+
+
+def compile_sketch(state, args):
+    """Like `compile [--upload -p PORT] SKETCH`, with gcc-style messages for marked lines."""
+    port = args[args.index("-p") + 1] if "-p" in args else None
+    values = {port} if port else set()
+    sketch = [a for a in args[1:] if not a.startswith("-") and a not in values][0]
+    sketch = os.path.abspath(sketch)
+    name = os.path.basename(sketch.rstrip("/"))
+    yaml_path = os.path.join(sketch, "sketch.yaml")
+    if not os.path.exists(yaml_path) or "fqbn:" not in open(yaml_path).read():
+        fail("Error during build: Missing FQBN (Fully Qualified Board Name)")
+    main_file = os.path.join(sketch, name + ".ino")
+    lines = open(main_file).read().split("\n")
+    if state["compile_slow"]:
+        time.sleep(30)
+    time.sleep(0.2)
+    errors = 0
+    for number, line in enumerate(lines, 1):
+        if "WARN_HERE" in line:
+            sys.stderr.write("%s:%d:7: warning: unused variable 'x' [-Wunused-variable]\n   %s\n" % (main_file, number, line))
+        if "ERROR_HERE" in line:
+            errors += 1
+            sys.stderr.write("%s: In function 'void setup()':\n" % main_file)
+            sys.stderr.write("%s:%d:3: error: 'foo' was not declared in this scope\n   %s\n   ^~~\n" % (main_file, number, line))
+    sys.stderr.flush()
+    if errors:
+        sys.stderr.write("Error during build: exit status 1\n")
+        sys.exit(1)
+    print("Sketch uses 924 bytes (2%) of program storage space. Maximum is 32256 bytes.")
+    print("Global variables use 9 bytes (0%) of dynamic memory, leaving 2039 bytes for local variables. "
+          "Maximum is 2048 bytes.")
+    sys.stdout.flush()
+    if not port:
+        return
+    if port not in [p["address"] for p in state["ports"]]:
+        sys.stderr.write('avrdude: ser_open(): can\'t open device "%s": No such file or directory\n' % port)
+        sys.stderr.write("Failed uploading: uploading error: exit status 1\n")
+        sys.exit(1)
+    if state["upload_denied"]:
+        sys.stderr.write('avrdude: ser_open(): can\'t open device "%s": Permission denied\n' % port)
+        sys.stderr.write("Failed uploading: uploading error: exit status 1\n")
+        sys.exit(1)
+    for step in range(0, 51, 25):
+        sys.stderr.write("\rWriting | %s%s | %d%% 0.1s" % ("#" * step, " " * (50 - step), step * 2))
+        sys.stderr.flush()
+        time.sleep(0.05)
+    sys.stderr.write("\n\navrdude done.  Thank you.\n\n")
+    print("New upload port: %s (serial)" % port)
+
+
 def main(argv):
     global JSON
     log_call(argv)
@@ -348,6 +427,12 @@ def main(argv):
         if options:
             result["config_options"] = options
         out(result)
+    elif cmd == ["board", "list"]:
+        if "--watch" in args or "-w" in args:
+            board_list_watch()
+        out({"detected_ports": [port_json(p) for p in state["ports"]]})
+    elif cmd[:1] == ["compile"]:
+        compile_sketch(state, args)
     elif cmd == ["core", "install"]:
         core_install(state, args[2])
     elif cmd == ["core", "uninstall"]:

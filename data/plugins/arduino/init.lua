@@ -2,6 +2,7 @@
 local core = require "core"
 local common = require "core.common"
 local command = require "core.command"
+local keymap = require "core.keymap"
 local config = require "core.config"
 local style = require "core.style"
 local EmptyView = require "core.emptyview"
@@ -11,6 +12,7 @@ local NewProjectView = require "plugins.arduino.newprojectview"
 local access = require "plugins.arduino.access"
 local managed = require "plugins.arduino.managed_cli"
 local BoardPanel = require "plugins.arduino.board_panel"
+local BuildPanel = require "plugins.arduino.build_panel"
 require "plugins.arduino.access_ui"
 
 
@@ -248,6 +250,12 @@ EmptyView.add_section({
 
 
 BoardPanel.dock()
+-- docked after the Board panel, so it ends up between it and the file tree
+BuildPanel.dock()
+keymap.add({
+  ["ctrl+b"] = "arduino:build",
+  ["ctrl+u"] = "arduino:upload",
+})
 -- hidden by default: "20%" on the first line (the Vim Ctrl+G convention) looked
 -- like a bug; bring it back with core.status_view:show_items("doc:position-percent")
 core.status_view:hide_items("doc:position-percent")
