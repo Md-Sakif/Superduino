@@ -1,4 +1,4 @@
--- Going back with Backspace, Esc and breadcrumbs keeps choices; filtering ranks well.
+-- Going back with Esc and breadcrumbs keeps choices; Backspace only deletes text; filtering ranks well.
 return {
   before = function(T) T.mkdir(T.home .. "/Arduino") end,
   run = function(T)
@@ -11,7 +11,9 @@ return {
     for _ = 1, 4 do T.key("backspace") end
     T.eq(v.filter, "", "backspace clears the search")
     T.key("backspace")
-    T.eq(v.step, 2, "backspace on an empty search goes back")
+    T.eq(v.step, 3, "backspace on an empty search does not go back")
+    T.key("escape")
+    T.eq(v.step, 2, "escape on an empty search goes back")
     T.key("return")
     T.type("mega"); T.key("return")
     T.eq(v.choice[3], "arduino:avr:mega", "board chosen")

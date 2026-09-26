@@ -43,6 +43,8 @@ return {
     T.wait_until(function() return not panel.busy and #panel.urls == 1 end, 10, "removal")
     T.eq(panel.urls[1], GOOD, "only the good URL is left")
 
+    T.key("backspace")
+    T.check(v.panel ~= nil, "Backspace with an empty box does not close the panel")
     T.key("escape")
     T.eq(v.panel, nil, "Esc with an empty box closes the panel")
     T.type("earle"); T.eq(T.selected(v), "Earle F. Philhower, III", "the new vendor is in the list")

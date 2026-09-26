@@ -121,12 +121,8 @@ function IndexesPanel:escape()
 end
 
 function IndexesPanel:backspace()
-  if self.input ~= "" then
-    self.input = ui.remove_last_char(self.input)
-    core.redraw = true
-  else
-    self.view:close_panel()
-  end
+  self.input = ui.remove_last_char(self.input)
+  core.redraw = true
 end
 
 function IndexesPanel:text_input(text)

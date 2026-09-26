@@ -9,6 +9,8 @@ return {
     T.eq(v:get_list()[v.selected].installed, false, "marked as not installed")
     T.key("return")
     T.eq(v.panel and v.panel.state, "confirm", "asks before downloading")
+    T.key("backspace")
+    T.eq(v.panel and v.panel.state, "confirm", "Backspace does not dismiss the question")
     T.key("escape")
     T.eq(v.panel, nil, "Esc means not now")
     T.key("return")

@@ -48,7 +48,7 @@ local NAME_STEP = #STEPS
 
 local LIST_PLACEHOLDER = "Type to search..."
 local NAME_PLACEHOLDER = "MyProject"
-local KEYS_HINT = "Enter: continue    Backspace or Esc: go back"
+local KEYS_HINT = "Enter: continue    Esc: go back"
 
 
 ---@type arduino.newprojectview?
@@ -491,9 +491,8 @@ function NewProjectView:backspace()
   elseif self.step < NAME_STEP and self.filter ~= "" then
     self.filter = ui.remove_last_char(self.filter)
     self.selected, self.first_row = 1, 1
-  else
-    self:back()
   end
+  -- Backspace only deletes text; going back is Esc (or the Back button)
   core.redraw = true
 end
 

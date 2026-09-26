@@ -97,8 +97,6 @@ function TemplatesPanel:backspace()
     self.filter = ui.remove_last_char(self.filter)
     self.selected, self.first_row = 1, 1
     core.redraw = true
-  else
-    self.view:close_panel()
   end
 end
 

@@ -246,7 +246,7 @@ function InstallPanel:enter()
 end
 
 
--- Esc and Backspace: the safe choice. They never stop a running install.
+-- Esc: the safe choice. It never stops a running install.
 function InstallPanel:escape()
   local s = self.state
   if s == "running" or s == "setup-running" then return end
@@ -257,7 +257,8 @@ function InstallPanel:escape()
   local back = self:buttons().back
   if back and back.run then back.run() end
 end
-InstallPanel.backspace = InstallPanel.escape
+-- the install panel has no text to delete
+function InstallPanel:backspace() end
 
 
 function InstallPanel:on_close()
