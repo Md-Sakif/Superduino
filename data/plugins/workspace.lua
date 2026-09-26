@@ -65,6 +65,8 @@ local function save_view(view)
     }
   end
   if mt == LogView then return end
+  -- views that cannot be recreated from their module alone opt out
+  if view.save_in_workspace == false then return end
   for name, mod in pairs(package.loaded) do
     if mod == mt then
       return {

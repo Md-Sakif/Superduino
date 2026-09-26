@@ -24,6 +24,10 @@ local NewProjectView = View:extend()
 
 function NewProjectView:__tostring() return "NewProjectView" end
 
+-- Not restored with the session: opening a new project restarts the editor,
+-- which would bring the page back.
+NewProjectView.save_in_workspace = false
+
 local STEPS = {
   {
     title = "Vendor",

@@ -28,6 +28,9 @@ return {
       local yaml = T.read_file(dir .. "/sketch.yaml") or ""
       T.match(yaml, "fqbn: arduino:avr:uno", "profile has the board")
       T.match(yaml, "default_profile: uno", "profile is the default")
+      for _, view in ipairs(core.root_view.root_node:get_children()) do
+        T.check(tostring(view) ~= "NewProjectView", "the New Project page is closed")
+      end
       T.no_errors()
     end
   end,
