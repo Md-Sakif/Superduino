@@ -4,6 +4,7 @@ local config = require "core.config"
 local Doc = require "core.doc"
 local Node = require "core.node"
 local common = require "core.common"
+local style = require "core.style"
 local dirwatch = require "core.dirwatch"
 
 config.plugins.autoreload = common.merge({
@@ -70,17 +71,39 @@ local function check_prompt_reload(doc)
       { font = style.font, text = "Yes", default_yes = true },
       { font = style.font, text = "No" , default_no = true }
     }, function(item)
-      if item.text == "Yes" then reload_doc(doc) end
+      if item.text == "Yes" then
+        reload_doc(doc)
+      else
+        -- keep the edits; ask again only when the file changes again
+        update_time(doc)
+      end
       doc.deferred_reload = false
     end)
+  end
+end
+
+-- Reloads a doc whose file changed on disk, or asks first when it has unsaved
+-- changes (right away when `shown`, or when the doc is the active one).
+local function check_changed(doc, shown)
+  local info = system.get_file_info(doc.filename or "")
+  if info and times[doc] ~= info.modified then
+    if not doc:is_dirty() and not config.plugins.autoreload.always_show_nagview then
+      reload_doc(doc)
+    else
+      doc.deferred_reload = true
+      if shown or doc == core.active_view.doc then check_prompt_reload(doc) end
+    end
+  elseif shown then
+    check_prompt_reload(doc)
   end
 end
 
 local function doc_changes_visiblity(doc, visibility)
   if doc and visible[doc] ~= visibility and doc.abs_filename then
     visible[doc] = visibility
-    if visibility then check_prompt_reload(doc) end
     watch:watch(doc.abs_filename, visibility)
+    -- hidden docs are not watched: catch changes made while it was hidden
+    if visibility then check_changed(doc, true) end
   end
 end
 
@@ -101,17 +124,7 @@ core.add_thread(function()
   while true do
     watch:check(function(file)
       for i, doc in ipairs(core.docs) do
-        if doc.abs_filename == file then
-          local info = system.get_file_info(doc.filename or "")
-          if info and times[doc] ~= info.modified then
-            if not doc:is_dirty() and not config.plugins.autoreload.always_show_nagview then
-              reload_doc(doc)
-            else
-              doc.deferred_reload = true
-              if doc == core.active_view.doc then check_prompt_reload(doc) end
-            end
-          end
-        end
+        if doc.abs_filename == file then check_changed(doc) end
       end
     end)
     coroutine.yield(0.05)

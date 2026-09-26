@@ -594,6 +594,15 @@ function NewProjectView:save_board(close)
     if node then node:close_view(core.root_view.root_node, self) end
   end
   if not self:board_changed() then return finish() end
+  -- never overwrite edits of sketch.yaml that are not saved yet
+  local path = self.edit.sketch.path or (self.edit.dir .. PATHSEP .. "sketch.yaml")
+  for _, doc in ipairs(core.docs) do
+    if doc.abs_filename == path and doc:is_dirty() then
+      self:set_message(common.basename(path) .. " has unsaved changes in the editor. Save or undo them, "
+        .. "then apply again.", true)
+      return
+    end
+  end
   self.creating = true
   self:set_message("Saving...", false)
   core.add_thread(function()
@@ -607,6 +616,10 @@ function NewProjectView:save_board(close)
     core.log("%s now uses %s (profile %s)", common.basename(self.edit.dir), fqbn, name)
     -- what is saved now (the profile may have been renamed or created)
     self.edit.sketch = project.read_sketch(self.edit.dir) or self.edit.sketch
+    -- show it in sketch.yaml when it is open
+    for _, doc in ipairs(core.docs) do
+      if doc.abs_filename == self.edit.sketch.path and not doc:is_dirty() then doc:reload() end
+    end
     self:set_message("Saved to " .. common.basename(self.edit.sketch.path or "sketch.yaml") .. ".", false)
     finish()
   end)
