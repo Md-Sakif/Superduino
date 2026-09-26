@@ -203,7 +203,11 @@ end
 function T.shot(name)
   if not T.visible then return end
   local path = T.dir .. "/" .. name .. ".png"
-  local cmd = "W=$(xdotool search --name 'Superduino$' | head -1); "
+  -- this editor's window, not another Superduino that may be open
+  local pid = ""
+  local fp = io.open("/proc/self/stat")
+  if fp then pid = fp:read("l"):match("^(%d+)") or ""; fp:close() end
+  local cmd = "W=$(xdotool search --all --pid '" .. pid .. "' --name 'Superduino$' | head -1); "
     .. "[ -n \"$W\" ] && timeout 5 import -window \"$W\" '" .. path .. "'"
   local proc = process.start({ "sh", "-c", cmd })
   while proc:running() do coroutine.yield(0.1) end
