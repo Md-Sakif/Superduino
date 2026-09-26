@@ -178,6 +178,15 @@ function T.open_wizard()
   end, 15, "the New Project wizard to load")
 end
 
+---Waits until the wizard reached the name step (boards without settings skip
+---the options step once their settings were loaded).
+function T.name_step(view)
+  -- also wait for the page to be laid out for it (the step changes in a thread)
+  return T.wait_until(function()
+    return view.step == 5 and view.current_layout and view.current_layout.location_y ~= nil
+  end, 10, "the name step")
+end
+
 ---Label of the selected row in the wizard's current list.
 function T.selected(view)
   local item = view:get_list()[view.selected]

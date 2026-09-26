@@ -4,7 +4,7 @@ return {
     local core = require "core"
     local v = T.open_wizard()
     T.key("return"); T.key("return"); T.key("return")
-    T.eq(v.step, 4, "name step")
+    T.name_step(v)
     T.eq(v.location, T.home .. "/Arduino", "sketchbook location")
     T.check(not v:location_exists(), "the sketchbook folder does not exist yet")
     T.check(v.current_layout.create_folder ~= nil, "Create Folder is offered")

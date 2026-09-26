@@ -54,6 +54,30 @@ DEFAULT_STATE = {
                          "name": "[DEPRECATED - Please install standalone packages] Arduino Mbed OS Boards",
                          "boards": [["Arduino Nano 33 BLE", "arduino:mbed:nano33ble"]]},
     },
+    "details_fail": False,     # `board details` fails (e.g. a broken boards.txt)
+    # board settings (menus) returned by `board details`, keyed by fqbn; the first value is the default
+    "board_options": {
+        "arduino:avr:nano": [
+            ["cpu", "Processor", [["atmega328", "ATmega328P"], ["atmega328old", "ATmega328P (Old Bootloader)"],
+                                  ["atmega168", "ATmega168"]]],
+        ],
+        "esp32:esp32:esp32": [
+            ["UploadSpeed", "Upload Speed", [["921600", "921600"], ["115200", "115200"], ["460800", "460800"]]],
+            ["CPUFreq", "CPU Frequency", [["240", "240MHz (WiFi/BT)"], ["160", "160MHz (WiFi/BT)"],
+                                          ["80", "80MHz (WiFi/BT)"]]],
+            ["FlashSize", "Flash Size", [["4M", "4MB (32Mb)"], ["8M", "8MB (64Mb)"], ["16M", "16MB (128Mb)"]]],
+            ["PartitionScheme", "Partition Scheme", [
+                ["default", "Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)"],
+                ["defaultffat", "Default 4MB with ffat (1.2MB APP/1.5MB FATFS)"],
+                ["minimal", "Minimal (1.3MB APP/700KB SPIFFS)"],
+                ["no_ota", "No OTA (2MB APP/2MB SPIFFS)"],
+                ["huge_app", "Huge APP (3MB No OTA/1MB SPIFFS)"],
+                ["min_spiffs", "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)"]]],
+            ["PSRAM", "PSRAM", [["disabled", "Disabled"], ["enabled", "Enabled"]]],
+            ["DebugLevel", "Core Debug Level", [["none", "None"], ["error", "Error"], ["warn", "Warn"],
+                                                 ["info", "Info"], ["debug", "Debug"], ["verbose", "Verbose"]]],
+        ],
+    },
     # examples returned by `lib examples`, keyed by platform id
     "examples": {
         "arduino:avr": [
@@ -267,6 +291,28 @@ def main(argv):
                     "metadata": {"id": pid, "maintainer": p["maintainer"], "indexed": True},
                     "release": {"name": p["name"], "version": version, "installed": True}}})
         out({"boards": boards} if boards else {})
+    elif cmd == ["board", "details"]:
+        fqbn = args[args.index("-b") + 1]
+        parts = fqbn.split(":")
+        base, pid = ":".join(parts[:3]), ":".join(parts[:2])
+        if pid not in state["installed"]:
+            fail("Error getting board details: Unknown FQBN: platform %s is not installed" % pid)
+        if state["details_fail"]:
+            fail("Error getting board details: Unknown FQBN: loading boards.txt: invalid menu entry")
+        chosen = dict(kv.split("=", 1) for kv in parts[3].split(",")) if len(parts) > 3 and parts[3] else {}
+        options = []
+        for option, label, values in state["board_options"].get(base, []):
+            pick = chosen.get(option, values[0][0])
+            if pick not in [v for v, _ in values]:
+                fail("Error getting board details: Unknown FQBN: getting build properties for board %s: "
+                     "invalid value '%s' for option '%s'" % (base, pick, option))
+            options.append({"option": option, "option_label": label,
+                            "values": [dict({"value": v, "value_label": l}, **({"selected": True} if v == pick else {}))
+                                       for v, l in values]})
+        result = {"fqbn": base, "name": base}
+        if options:
+            result["config_options"] = options
+        out(result)
     elif cmd == ["core", "install"]:
         core_install(state, args[2])
     elif cmd == ["core", "uninstall"]:

@@ -6,6 +6,7 @@ return {
     if T.phase == 1 then
       local v = T.open_wizard()
       T.key("return"); T.key("return"); T.type("uno"); T.key("return")
+      T.name_step(v)
       T.eq(v.template, nil, "empty sketch by default")
       local button = v.current_layout.choose_template
       v:on_mouse_pressed("left", button.x + 2, button.y + 2, 1)
@@ -30,6 +31,7 @@ return {
       -- now a library example with several files
       local v = T.open_wizard()
       T.key("return"); T.key("return"); T.type("uno"); T.key("return")
+      T.name_step(v)
       v:choose_template()
       local panel = v.panel
       T.wait_until(function() return not panel.loading end, 10, "examples to load")

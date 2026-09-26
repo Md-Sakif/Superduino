@@ -6,7 +6,7 @@ return {
   run = function(T)
     local v = T.open_wizard()
     T.key("return"); T.key("return"); T.key("return")
-    T.eq(v.step, 4, "name step")
+    T.name_step(v)
     local cases = {
       { "My Blink", "Spaces are not allowed" },
       { "-x", "must start with a letter" },
@@ -23,10 +23,10 @@ return {
     T.eq(v:name_problem(), nil, "a valid name is accepted")
     v.name = ""
     T.key("backspace")
-    T.eq(v.step, 4, "backspace on an empty name does not go back")
+    T.eq(v.step, 5, "backspace on an empty name does not go back")
     v.name = "Taken"
     T.key("return")
     T.match(v.message or "", "already exists", "creating with a bad name explains why")
-    T.eq(v.step, 4, "stays on the name step")
+    T.eq(v.step, 5, "stays on the name step")
   end,
 }

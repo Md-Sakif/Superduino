@@ -20,6 +20,8 @@ local STORAGE_MODULE, OPEN_AFTER_RESTART_KEY = "arduino", "open-after-restart"
 
 -- boards of the installed platforms, loaded once per session
 local boards_cache
+-- board options by fqbn (see `project.load_board_options`)
+local options_cache = {}
 
 
 ---Loads the boards of the installed platforms, sorted by name.
@@ -117,6 +119,63 @@ end
 ---Forgets the loaded boards and platforms, e.g. after installing a platform.
 function project.forget_cache()
   boards_cache, platforms_cache = nil, nil
+  options_cache = {}
+end
+
+
+---A board setting, from the board's menus in boards.txt (e.g. Partition Scheme).
+---@class arduino.board_option
+---@field option string e.g. "PartitionScheme"
+---@field label string e.g. "Partition Scheme"
+---@field default string Value used when the setting is not changed
+---@field values { value: string, label: string }[]
+
+
+---Loads the settings a board offers besides its fqbn. Boards without any
+---(e.g. Arduino UNO) return an empty list.
+---Must be called from a thread (see `core.add_thread`).
+---@param fqbn string
+---@return arduino.board_option[]? options
+---@return string? error
+function project.load_board_options(fqbn)
+  if options_cache[fqbn] then return options_cache[fqbn] end
+  local result, err = cli.run_json({ "board", "details", "-b", fqbn })
+  if not result then return nil, err end
+  local options = {}
+  for _, entry in ipairs(type(result.config_options) == "table" and result.config_options or {}) do
+    if type(entry.option) == "string" and type(entry.values) == "table" and #entry.values > 0 then
+      local option = { option = entry.option, label = entry.option_label or entry.option, values = {} }
+      for _, value in ipairs(entry.values) do
+        if type(value.value) == "string" then
+          table.insert(option.values, { value = value.value, label = value.value_label or value.value })
+          if value.selected then option.default = value.value end
+        end
+      end
+      if #option.values > 0 then
+        -- arduino-cli marks the default as selected; the first value is the default otherwise
+        option.default = option.default or option.values[1].value
+        table.insert(options, option)
+      end
+    end
+  end
+  options_cache[fqbn] = options
+  return options
+end
+
+
+---The fqbn with the changed settings, e.g. "esp32:esp32:esp32:PSRAM=enabled".
+---Settings left at their default are not included, so arduino-cli uses the default.
+---@param fqbn string
+---@param options arduino.board_option[]
+---@param chosen table<string, string> Chosen value by option
+---@return string
+function project.fqbn_with_options(fqbn, options, chosen)
+  local parts = {}
+  for _, option in ipairs(options or {}) do
+    local value = chosen[option.option]
+    if value and value ~= option.default then table.insert(parts, option.option .. "=" .. value) end
+  end
+  return #parts > 0 and (fqbn .. ":" .. table.concat(parts, ",")) or fqbn
 end
 
 
@@ -501,9 +560,11 @@ end
 ---@param path string
 ---@param board arduino.board
 ---@param template? arduino.template
+---@param fqbn? string The board's fqbn with its chosen settings (see `project.fqbn_with_options`)
 ---@return boolean created
 ---@return string? error
-function project.create(path, board, template)
+function project.create(path, board, template, fqbn)
+  fqbn = fqbn or board.fqbn
   local name = common.basename(path)
   local parent = common.dirname(path)
   local parent_info = parent and system.get_file_info(parent)
@@ -519,7 +580,7 @@ function project.create(path, board, template)
     end
   end
   local profile = project.profile_name(board.fqbn)
-  _, err = cli.run_json({ "profile", "create", "--profile", profile, "--fqbn", board.fqbn, "--set-default", path })
+  _, err = cli.run_json({ "profile", "create", "--profile", profile, "--fqbn", fqbn, "--set-default", path })
   if err then
     core.error("Created %s, but could not add the %s build profile: %s", name, board.name, err)
   else

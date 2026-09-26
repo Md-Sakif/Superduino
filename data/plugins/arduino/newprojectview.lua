@@ -1,6 +1,7 @@
--- Step-by-step "New Project" page: vendor, architecture, board, then a name.
--- Panels (install/repair, board indexes, templates) temporarily replace the
--- list or name area; see install_panel.lua, indexes_panel.lua, templates_panel.lua.
+-- Step-by-step "New Project" page: vendor, architecture, board, the board's
+-- settings, then a name. Panels (install/repair, board indexes, a setting's
+-- values, templates) temporarily replace the list or name area; see
+-- install_panel.lua, indexes_panel.lua, option_panel.lua, templates_panel.lua.
 local core = require "core"
 local common = require "core.common"
 local command = require "core.command"
@@ -15,6 +16,7 @@ local ui = require "plugins.arduino.ui"
 local InstallPanel = require "plugins.arduino.install_panel"
 local IndexesPanel = require "plugins.arduino.indexes_panel"
 local TemplatesPanel = require "plugins.arduino.templates_panel"
+local OptionPanel = require "plugins.arduino.option_panel"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -39,16 +41,23 @@ local STEPS = {
     hint = "Type to search, for example uno or nano.",
   },
   {
+    title = "Options",
+    question = "Adjust the board's settings (optional)",
+    hint = "The defaults suit most projects. Change only what you need, e.g. Partition Scheme or PSRAM.",
+  },
+  {
     title = "Name",
     question = "Give your project a name",
     hint = "Use letters, numbers, _ - or . (no spaces). For example: Blink",
   },
 }
+local OPTIONS_STEP = 4
 local NAME_STEP = #STEPS
 
 local LIST_PLACEHOLDER = "Type to search..."
 local NAME_PLACEHOLDER = "MyProject"
 local KEYS_HINT = "Enter: continue    Esc: go back"
+local OPTIONS_KEYS_HINT = "←/→: change    Space: all choices    Enter: continue"
 
 
 ---@type arduino.newprojectview?
@@ -65,9 +74,11 @@ function NewProjectView:new()
   self.name = ""
   self.location = nil
   self.template = nil -- nil means the empty sketch
+  self.board_options = nil -- { fqbn, loading, options?, error?, skip? } of the chosen board
+  self.option_choice = {} -- changed board settings: value by option name
   self.boards = nil
   self.platforms = {}
-  self.panel = nil -- InstallPanel, IndexesPanel or TemplatesPanel
+  self.panel = nil -- InstallPanel, IndexesPanel, OptionPanel or TemplatesPanel
   self.index = { state = "idle" } -- board list refresh: idle, updating, updated, offline, failed
   self.loading = true
   self.load_error = nil
@@ -282,6 +293,19 @@ function NewProjectView:get_step_items(step)
         table.insert(items, { key = board.fqbn, label = board.name, detail = board.fqbn, board = board, installed = true })
       end
     end
+  elseif step == OPTIONS_STEP then
+    for _, option in ipairs(self:get_options() or {}) do
+      local value = self:option_value(option)
+      local changed = value ~= option.default
+      table.insert(items, {
+        key = option.option,
+        label = option.label,
+        note = changed and ("changed, default: " .. self:value_label(option, option.default)) or nil,
+        detail = self:value_label(option, value),
+        detail_color = changed and style.accent or nil,
+        option = option,
+      })
+    end
   end
   return items
 end
@@ -325,6 +349,12 @@ end
 
 -- Visible items of the current list step, filtered by the search text.
 function NewProjectView:get_list()
+  if self.step == OPTIONS_STEP then
+    -- a few rows whose values change in place: not cached, not filtered
+    self.list_key = nil
+    self.list = self:get_step_items(OPTIONS_STEP)
+    return self.list
+  end
   local key = self.step .. "\0" .. tostring(self.choice[1]) .. "\0" .. tostring(self.choice[2]) .. "\0" .. self.filter
   if self.list_key ~= key or self.list_boards ~= self.boards or self.list_platforms ~= self.platforms then
     self.list_key, self.list_boards, self.list_platforms = key, self.boards, self.platforms
@@ -336,7 +366,7 @@ end
 
 -- Keeps the same item selected after the list was reloaded.
 function NewProjectView:keep_selection()
-  if self.step >= NAME_STEP then return end
+  if self.step >= OPTIONS_STEP then return end
   local key = self.list and self.list[self.selected] and self.list[self.selected].key or self.choice[self.step]
   self.list_key = nil
   for i, item in ipairs(self:get_list()) do
@@ -355,9 +385,127 @@ end
 
 -- Short text describing what was chosen at a list step.
 function NewProjectView:choice_label(step)
+  if step == OPTIONS_STEP then
+    local options = self:get_options()
+    if not options then return nil end
+    if #options == 0 then return "No options" end
+    local changed = 0
+    for _, option in ipairs(options) do
+      if self:option_value(option) ~= option.default then changed = changed + 1 end
+    end
+    return changed == 0 and "Default options" or (changed == 1 and "1 option changed" or (changed .. " options changed"))
+  end
   for _, item in ipairs(self:get_step_items(step)) do
     if item.key == self.choice[step] then return item.label end
   end
+end
+
+
+-------------------------------------------------------------------------------
+-- Board settings (the options part of the fqbn)
+-------------------------------------------------------------------------------
+
+---Settings of the chosen board, or nil while they load or when they could not be loaded.
+---@return arduino.board_option[]?
+function NewProjectView:get_options()
+  local board, state = self:get_board(), self.board_options
+  if board and state and state.fqbn == board.fqbn then return state.options end
+end
+
+
+function NewProjectView:option_value(option)
+  return self.option_choice[option.option] or option.default
+end
+
+
+function NewProjectView:value_label(option, value)
+  for _, entry in ipairs(option.values) do
+    if entry.value == value then return entry.label end
+  end
+  return value
+end
+
+
+function NewProjectView:set_option_value(option, value)
+  self.option_choice[option.option] = value ~= option.default and value or nil
+  core.redraw = true
+end
+
+
+---Changes the selected setting to its previous (-1) or next (1) value.
+function NewProjectView:step_option_value(delta)
+  local item = self.step == OPTIONS_STEP and not self.panel and self:get_list()[self.selected]
+  if not item then return end
+  local option, current = item.option, self:option_value(item.option)
+  for i, entry in ipairs(option.values) do
+    if entry.value == current then
+      local new = option.values[common.clamp(i + delta, 1, #option.values)]
+      self:set_option_value(option, new.value)
+      return
+    end
+  end
+end
+
+
+function NewProjectView:open_option()
+  local item = self.step == OPTIONS_STEP and not self.panel and self:get_list()[self.selected]
+  if item then self:open_panel(OptionPanel.new(self, item.option)) end
+end
+
+
+function NewProjectView:reset_options()
+  self.option_choice = {}
+  core.redraw = true
+end
+
+
+---The chosen board's fqbn with its changed settings.
+function NewProjectView:get_fqbn()
+  local board = self:get_board()
+  return board and project.fqbn_with_options(board.fqbn, self:get_options(), self.option_choice)
+end
+
+
+---Loads the settings of the chosen board in the background.
+---@param skip_if_none? boolean Go on to the name step when the board has no settings
+function NewProjectView:load_options(skip_if_none)
+  local board = self:get_board()
+  if not board then return end
+  local state = self.board_options
+  if state and state.fqbn == board.fqbn and not state.error then
+    if state.loading then
+      state.skip = state.skip or skip_if_none
+    elseif skip_if_none and #state.options == 0 then
+      self:skip_options()
+    end
+    return
+  end
+  state = { fqbn = board.fqbn, loading = true, skip = skip_if_none }
+  self.board_options = state
+  core.redraw = true
+  core.add_thread(function()
+    local options, err = project.load_board_options(board.fqbn)
+    state.loading, state.options, state.error = false, options, err
+    if err then core.warn("Could not load the settings of %s: %s", board.name, err) end
+    if self.board_options == state and state.skip and options and #options == 0
+      and self.step == OPTIONS_STEP and not self.panel then
+      self:skip_options()
+    end
+    core.redraw = true
+  end)
+end
+
+
+-- Boards without settings go straight from the board step to the name step.
+function NewProjectView:skip_options()
+  self.choice[OPTIONS_STEP] = "none"
+  self:enter_step(NAME_STEP)
+end
+
+
+function NewProjectView:retry_options()
+  self.board_options = nil
+  self:load_options()
 end
 
 
@@ -369,7 +517,9 @@ function NewProjectView:enter_step(step)
   self.step = step
   self.filter = ""
   self.selected, self.first_row = 1, 1
-  if step < NAME_STEP then
+  if step == OPTIONS_STEP then
+    self:load_options()
+  elseif step < OPTIONS_STEP then
     for i, item in ipairs(self:get_list()) do
       if item.key == self.choice[step] then self.selected = i break end
     end
@@ -428,6 +578,15 @@ function NewProjectView:next()
     self:create()
     return
   end
+  if self.step == OPTIONS_STEP then
+    local state = self.board_options
+    if state and state.loading then return end
+    -- also when the settings could not be loaded: the board's defaults are used
+    self.choice[OPTIONS_STEP] = "done"
+    self.message = nil
+    self:enter_step(NAME_STEP)
+    return
+  end
   local item = self:get_list()[self.selected]
   if not item then return end
   if self.step == 2 and not item.installed then
@@ -438,10 +597,14 @@ function NewProjectView:next()
     self.choice[self.step] = item.key
     -- later choices depended on this one
     for i = self.step + 1, NAME_STEP - 1 do self.choice[i] = nil end
-    if self.step == 3 then self.template = nil end
+    if self.step == 3 then
+      self.template = nil
+      self.option_choice = {}
+    end
   end
   self.message = nil
   self:enter_step(self.step + 1)
+  if self.step == OPTIONS_STEP then self:load_options(true) end
 end
 
 
@@ -452,6 +615,12 @@ function NewProjectView:back()
   end
   if self.creating or self.step == 1 then return end
   self.message = nil
+  local options = self:get_options()
+  if self.step == NAME_STEP and options and #options == 0 then
+    -- the options step was skipped on the way here
+    self:enter_step(OPTIONS_STEP - 1)
+    return
+  end
   self:enter_step(self.step - 1)
 end
 
@@ -487,7 +656,10 @@ function NewProjectView:type_text(text)
     return
   end
   text = text:gsub("[\r\n]", "")
-  if self.step == NAME_STEP then
+  if self.step == OPTIONS_STEP then
+    -- no search on the settings step (Space opens the values of a setting)
+    return
+  elseif self.step == NAME_STEP then
     self.name = self.name .. text
     self.message = nil
   else
@@ -507,7 +679,7 @@ function NewProjectView:backspace()
   if self.step == NAME_STEP and self.name ~= "" then
     self.name = ui.remove_last_char(self.name)
     self.message = nil
-  elseif self.step < NAME_STEP and self.filter ~= "" then
+  elseif self.step < OPTIONS_STEP and self.filter ~= "" then
     self.filter = ui.remove_last_char(self.filter)
     self.selected, self.first_row = 1, 1
   end
@@ -519,7 +691,7 @@ end
 function NewProjectView:escape()
   if self.panel then
     self.panel:escape()
-  elseif self.step < NAME_STEP and self.filter ~= "" then
+  elseif self.step < OPTIONS_STEP and self.filter ~= "" then
     self.filter = ""
     self.selected, self.first_row = 1, 1
     core.redraw = true
@@ -618,7 +790,7 @@ function NewProjectView:create()
   self.creating = true
   self:set_message("Creating " .. self.name .. "...", false)
   core.add_thread(function()
-    local ok, err = project.create(path, board, self.template)
+    local ok, err = project.create(path, board, self.template, self:get_fqbn())
     self.creating = false
     if not ok then
       local explanation = cli.explain_error(err)
@@ -664,10 +836,14 @@ function NewProjectView:page_buttons()
     return { next = { text = "Try Again", run = function() self:load() end },
       hint = "Enter: try again" }
   end
-  local buttons = { hint = KEYS_HINT }
+  local has_options = self.step == OPTIONS_STEP and #self:get_list() > 0
+  local buttons = { hint = has_options and OPTIONS_KEYS_HINT or KEYS_HINT }
   if self.step > 1 then buttons.back = { text = "←  Back", run = function() self:back() end } end
   if self.step == NAME_STEP then
     buttons.next = { text = "Create Project", run = function() self:next() end }
+  elseif self.step == OPTIONS_STEP then
+    local state = self.board_options
+    buttons.next = { text = "Next  →", run = function() self:next() end, enabled = not (state and state.loading) }
   else
     buttons.next = { text = "Next  →", run = function() self:next() end,
       enabled = self:get_list()[self.selected] ~= nil }
@@ -700,7 +876,7 @@ function NewProjectView:layout()
   L.crumbs = {}
   local x = L.x
   for i, step in ipairs(STEPS) do
-    local text = (i < self.step and i < NAME_STEP and self:choice_label(i)) or step.title
+    local text = (i < self.step and i < NAME_STEP and self.choice[i] and self:choice_label(i)) or step.title
     local w = font:get_width(text)
     local crumb = { text = text, x = x, y = y, w = w, h = row_h, index = i }
     table.insert(L.crumbs, crumb)
@@ -717,19 +893,31 @@ function NewProjectView:layout()
   L.hint_y = y
   y = y + line_h + pad_y
 
-  -- board list status and tools on the vendor and architecture steps
-  if self.step <= 2 and not self.panel and not self.load_error then
-    L.tools_y = y
+  -- status and tools: the board list on the vendor and architecture steps,
+  -- the board's settings on the options step
+  local has_tools = self.step <= 2 or self.step == OPTIONS_STEP
+  if has_tools and not self.panel and not self.load_error then
+    L.tools_y, L.tools_h = y, row_h
     local right = L.x + L.w
     L.tools = {}
     local tools = {}
-    if self.step == 1 then
+    if self.step == OPTIONS_STEP then
+      local state = self.board_options
+      if state and state.error then
+        table.insert(tools, { id = "tool:retry-options", text = "Try Again", run = function() self:retry_options() end })
+      elseif #self:get_list() > 0 then
+        table.insert(tools, { id = "tool:reset-options", text = "Reset to Defaults", run = function() self:reset_options() end,
+          enabled = next(self.option_choice) ~= nil })
+      end
+    elseif self.step == 1 then
       -- a new board index adds new vendors, so it belongs where vendors are chosen
       table.insert(tools, { id = "tool:indexes", text = "Add Vendor by URL...",
         run = function() self:open_panel(IndexesPanel.new(self)) end })
     end
-    table.insert(tools, { id = "tool:refresh", text = "Refresh", run = function() self:refresh_index() end,
-      enabled = self.index.state ~= "updating" })
+    if self.step <= 2 then
+      table.insert(tools, { id = "tool:refresh", text = "Refresh", run = function() self:refresh_index() end,
+        enabled = self.index.state ~= "updating" })
+    end
     for _, tool in ipairs(tools) do
       local w = font:get_width(tool.text) + pad_x
       local link = { id = tool.id, text = tool.text, x = right - w, y = y, w = w, h = row_h, enabled = tool.enabled ~= false }
@@ -762,6 +950,9 @@ function NewProjectView:layout()
     end
   elseif self.load_error then
     L.load_error = area
+  elseif self.step == OPTIONS_STEP then
+    -- no search box: the settings of one board fit in the list
+    self:layout_list(L, { x = L.x, y = y, w = L.w, h = math.max(row_h, L.message_y - pad_y - y) }, row_h)
   else
     L.box = { x = L.x, y = y, w = L.w, h = box_h }
     y = y + box_h + pad_y
@@ -817,7 +1008,11 @@ function NewProjectView:layout_list(L, list, row_h)
     table.insert(L.rows, row)
     self:add_target(row.id, row.x, row.y, row.w, row.h, function(clicks)
       self.selected = i
-      if clicks and clicks >= 2 then self:next() end
+      if self.step == OPTIONS_STEP then
+        self:open_option()
+      elseif clicks and clicks >= 2 then
+        self:next()
+      end
       core.redraw = true
     end)
   end
@@ -875,6 +1070,20 @@ function NewProjectView:index_status()
 end
 
 
+-- Text of the board settings status line.
+function NewProjectView:options_status()
+  local state, board = self.board_options, self:get_board()
+  local fqbn = self:get_fqbn()
+  if not state or state.loading or state.error or #state.options == 0 then
+    -- explained below the status line
+    return "", style.dim
+  elseif fqbn and board and fqbn ~= board.fqbn then
+    return "Board id: " .. fqbn, style.dim
+  end
+  return "All settings are at their defaults.", style.dim
+end
+
+
 function NewProjectView:draw()
   self:draw_background(style.background)
   local L = self.current_layout
@@ -908,8 +1117,13 @@ function NewProjectView:draw()
   common.draw_text(font, style.dim, step.hint, "left", L.x, L.hint_y, 0, font:get_height())
 
   if L.tools then
-    local text, color = self:index_status()
-    common.draw_text(font, color, ui.truncate(font, text, L.tools_status_w), "left", L.x, L.tools_y, 0, L.tools[1].h)
+    local text, color
+    if self.step == OPTIONS_STEP then
+      text, color = self:options_status()
+    else
+      text, color = self:index_status()
+    end
+    common.draw_text(font, color, ui.truncate(font, text, L.tools_status_w), "left", L.x, L.tools_y, 0, L.tools_h)
     for _, link in ipairs(L.tools) do
       if self.hovered_id == link.id and link.enabled then
         renderer.draw_rect(link.x, link.y, link.w, link.h, style.line_highlight)
@@ -926,6 +1140,8 @@ function NewProjectView:draw()
     W.paragraph("Could not load the list of boards.", style.error)
     if explanation then W.paragraph(explanation, style.text) end
     W.paragraph("Details: " .. tostring(self.load_error), style.dim)
+  elseif self.step == OPTIONS_STEP and L.list then
+    self:draw_options(L)
   elseif L.box then
     local value = self.step == NAME_STEP and self.name or self.filter
     local placeholder = self.step == NAME_STEP and NAME_PLACEHOLDER or LIST_PLACEHOLDER
@@ -986,7 +1202,8 @@ function NewProjectView:draw_name_step(L)
   local board = self:get_board()
   if board then
     local name_end = labelled("Board:", board.name, style.text, L.board_y, L.x + L.w, false)
-    common.draw_text(font, style.dim, board.fqbn, "left", name_end + pad_x, L.board_y, 0, h)
+    common.draw_text(font, style.dim, ui.truncate(font, self:get_fqbn(), L.x + L.w - name_end - pad_x), "left",
+      name_end + pad_x, L.board_y, 0, h)
   end
 
   local template = self.template
@@ -997,6 +1214,31 @@ function NewProjectView:draw_name_step(L)
   common.draw_text(font, style.dim, ui.truncate(font, note, L.choose_template.x - pad_x - name_end - pad_x), "left",
     name_end + pad_x, L.template_y, 0, h)
   ui.draw_button(L.choose_template, self.hovered_id == L.choose_template.id, false)
+end
+
+
+function NewProjectView:draw_options(L)
+  local font = style.font
+  local pad_x = style.padding.x
+  local state, board = self.board_options, self:get_board()
+  if not state or state.loading then
+    common.draw_text(font, style.dim, "Loading the settings of " .. (board and board.name or "the board") .. "...",
+      "left", L.x + pad_x, L.list.y, 0, L.row_h)
+  elseif state.error then
+    local W = ui.writer(L.x + pad_x, L.list.y, L.w - pad_x * 2)
+    local explanation = cli.explain_error(state.error)
+    W.paragraph("Could not load the settings of " .. (board and board.name or "the board") .. ".", style.warn)
+    if explanation then W.paragraph(explanation, style.text) end
+    W.paragraph("You can continue: the project then uses the board's default settings. Details: "
+      .. tostring(state.error), style.dim)
+  elseif #state.options == 0 then
+    common.draw_text(font, style.dim, (board and board.name or "This board") .. " has no settings to change.",
+      "left", L.x + pad_x, L.list.y, 0, L.row_h)
+  end
+  ui.draw_rows(L.rows, self.selected, self.hovered_id)
+  if L.more_below then
+    common.draw_text(font, style.dim, "more below...", "right", L.x, L.list.y + L.list.h - L.row_h / 2, L.w - pad_x, L.row_h / 2)
+  end
 end
 
 
@@ -1132,6 +1374,16 @@ command.add(NewProjectView, {
   ["new-project:paste"] = function(view) view:type_text(system.get_clipboard() or "") end,
 })
 
+-- keys of the board settings step; elsewhere they do nothing here, so e.g. Space still types
+command.add(function()
+  local view = core.active_view
+  return view:is(NewProjectView) and view.step == OPTIONS_STEP and not view.panel and not view.creating, view
+end, {
+  ["new-project:previous-value"] = function(view) view:step_option_value(-1) end,
+  ["new-project:next-value"] = function(view) view:step_option_value(1) end,
+  ["new-project:open-option"] = function(view) view:open_option() end,
+})
+
 keymap.add({
   ["return"] = "new-project:next",
   ["keypad enter"] = "new-project:next",
@@ -1145,6 +1397,9 @@ keymap.add({
   ["home"] = "new-project:select-first",
   ["end"] = "new-project:select-last",
   ["ctrl+v"] = "new-project:paste",
+  ["left"] = "new-project:previous-value",
+  ["right"] = "new-project:next-value",
+  ["space"] = "new-project:open-option",
 })
 
 

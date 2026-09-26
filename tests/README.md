@@ -43,7 +43,7 @@ return {
 
 Useful helpers (see `tests/harness.lua`): `T.check`, `T.eq`, `T.match`,
 `T.wait_until`, `T.key`, `T.type`, `T.command`, `T.open_wizard`,
-`T.selected`, `T.no_errors`, `T.mkdir`, `T.read_file`, `T.shot`.
+`T.selected`, `T.name_step`, `T.no_errors`, `T.mkdir`, `T.read_file`, `T.shot`.
 
 Cases named `real_*` use the network and the real arduino-cli (for example
 downloading it the way "Download arduino-cli for Me" does). They are skipped
