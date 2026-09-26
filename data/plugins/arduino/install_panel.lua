@@ -7,6 +7,7 @@ local EmptyView = require "core.emptyview"
 local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
 local access = require "plugins.arduino.access"
+local install_size = require "plugins.arduino.install_size"
 local ui = require "plugins.arduino.ui"
 
 local InstallPanel = {}
@@ -30,6 +31,16 @@ InstallPanel.examples = examples
 function InstallPanel.new(view, platform, mode)
   local panel = setmetatable({ view = view, platform = platform, mode = mode or "install" }, InstallPanel)
   panel.state = panel.mode == "repair" and "incomplete" or "confirm"
+  -- how much it downloads (arduino-cli installs the latest version)
+  local version = platform.platform and platform.platform.latest_version
+  if version and version ~= "" then
+    core.add_thread(function()
+      local ok, size = pcall(install_size.estimate, platform.id, version)
+      if not ok then core.warn("Could not estimate the size of %s: %s", platform.id, tostring(size)) end
+      panel.size = ok and size or nil
+      core.redraw = true
+    end)
+  end
   return panel
 end
 
@@ -296,6 +307,7 @@ function InstallPanel:draw(rect)
     if boards then W.paragraph("Boards in this family: " .. boards .. ".", style.dim) end
     W.paragraph("Package: " .. platform.id .. (version ~= "" and ("  version " .. version) or "")
       .. "  from " .. (platform.vendor_name or "?"), style.dim)
+    if self.size then W.paragraph(install_size.describe(self.size), style.text) end
     W.paragraph("Downloading needs an internet connection and can take a few minutes for large families.", style.dim)
   elseif s == "running" or s == "confirm-cancel" then
     W.paragraph((self.mode == "repair" and "Repairing " or "Installing ") .. platform.name, style.accent)
@@ -335,6 +347,7 @@ function InstallPanel:draw(rect)
     if self.note then W.paragraph(self.note, style.text) end
     W.paragraph("Boards of this family will not compile or upload correctly until it is repaired. Repairing "
       .. "removes what was installed and installs it again.", style.text)
+    if self.size then W.paragraph(install_size.describe(self.size), style.dim) end
     if self.error then explained_error() end
     W.paragraph("You can repair it now or later: the welcome screen keeps reminding you until it is fixed.", style.dim)
   else

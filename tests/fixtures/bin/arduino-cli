@@ -54,6 +54,8 @@ DEFAULT_STATE = {
                          "name": "[DEPRECATED - Please install standalone packages] Arduino Mbed OS Boards",
                          "boards": [["Arduino Nano 33 BLE", "arduino:mbed:nano33ble"]]},
     },
+    # archive sizes in bytes written to package_index.json: [platform, its <arch>-gcc tool]
+    "sizes": {"esp32:esp32": [31000000, 681000000], "arduino:samd": [2920000, 95230000]},
     "details_fail": False,     # `board details` fails (e.g. a broken boards.txt)
     # board settings (menus) returned by `board details`, keyed by fqbn; the first value is the default
     "board_options": {
@@ -172,6 +174,34 @@ def platform_json(state, pid, p):
     return obj
 
 
+def write_package_index(state):
+    """Writes package_index.json like arduino-cli keeps it, with archive sizes."""
+    packages = {}
+    for pid, p in all_platforms(state).items():
+        vendor, arch = pid.split(":")
+        size, tool_size = state["sizes"].get(pid, [1000000, 10000000])
+        package = packages.setdefault(vendor, {"name": vendor, "maintainer": p["maintainer"],
+                                               "platforms": [], "tools": []})
+        tool = {"packager": vendor, "name": arch + "-gcc", "version": "1.0.0"}
+        package["platforms"].append({"name": p["name"], "architecture": arch, "version": p["latest"],
+                                     "archiveFileName": "%s-%s.tar.bz2" % (arch, p["latest"]), "size": str(size),
+                                     "toolsDependencies": [tool],
+                                     "discoveryDependencies": [{"packager": "builtin", "name": "serial-discovery"}]})
+        hosts = ["x86_64-pc-linux-gnu", "aarch64-linux-gnu", "i686-mingw32", "x86_64-apple-darwin",
+                 "arm64-apple-darwin"]
+        systems = [{"host": h, "archiveFileName": "%s-gcc-%s.tar.gz" % (arch, h), "size": str(tool_size)} for h in hosts]
+        # another computer's build of a different size, which must not be counted
+        systems.insert(0, {"host": "i686-pc-linux-gnu", "archiveFileName": arch + "-gcc-i686.tar.gz", "size": "1"})
+        package["tools"].append(dict(tool, systems=systems))
+    # serial-discovery is already installed (it comes with arduino-cli's first run)
+    packages["builtin"] = {"name": "builtin", "platforms": [], "tools": [
+        {"name": "serial-discovery", "version": "1.4.1",
+         "systems": [{"host": "x86_64-pc-linux-gnu", "archiveFileName": "sd.tar.gz", "size": "5000000"}]}]}
+    os.makedirs(os.path.join(data_dir(), "packages", "builtin", "tools", "serial-discovery", "1.4.1"), exist_ok=True)
+    with open(os.path.join(data_dir(), "package_index.json"), "w") as fp:
+        json.dump({"packages": list(packages.values())}, fp)
+
+
 def update_index(state):
     if state["offline"]:
         fail("Some indexes could not be updated.",
@@ -181,6 +211,7 @@ def update_index(state):
     bad = [u for u in state["additional_urls"] if u in state["bad_urls"]]
     state["has_index"] = True
     save_state(state)
+    write_package_index(state)
     if bad:
         fail("Some indexes could not be updated.",
              ["Error initializing instance: Error downloading index '%s': Download failed: "
@@ -247,6 +278,8 @@ def main(argv):
         del args[i:i + 2]
     state = load_state()
     cmd = args[:2]
+    if state["has_index"] and not os.path.exists(os.path.join(data_dir(), "package_index.json")):
+        write_package_index(state)
 
     if args[:1] == ["version"]:
         out({"Application": "arduino-cli", "VersionString": state["version"], "Commit": "fake",

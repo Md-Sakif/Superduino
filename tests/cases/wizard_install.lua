@@ -9,6 +9,13 @@ return {
     T.eq(v:get_list()[v.selected].installed, false, "marked as not installed")
     T.key("return")
     T.eq(v.panel and v.panel.state, "confirm", "asks before downloading")
+    -- sizes from package_index.json: platform 2.92 MB + tool 95.23 MB for this computer;
+    -- serial-discovery is already installed and not counted
+    local panel = v.panel
+    local size = T.wait_until(function() return panel.size end, 10, "the download size")
+    T.eq(size and size.download, 98150000, "download size of the platform and its tools")
+    T.eq(size and require("plugins.arduino.install_size").describe(size),
+      "Downloads about 98 MB and needs about 491 MB of disk space.", "size is explained")
     T.key("backspace")
     T.eq(v.panel and v.panel.state, "confirm", "Backspace does not dismiss the question")
     T.key("escape")
