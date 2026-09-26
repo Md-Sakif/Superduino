@@ -248,6 +248,9 @@ EmptyView.add_section({
 
 
 BoardPanel.dock()
+-- hidden by default: "20%" on the first line (the Vim Ctrl+G convention) looked
+-- like a bug; bring it back with core.status_view:show_items("doc:position-percent")
+core.status_view:hide_items("doc:position-percent")
 table.insert(cli.on_checked, access.refresh)
 cli.init()
 project.open_pending()
