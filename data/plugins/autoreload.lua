@@ -26,7 +26,7 @@ local times = setmetatable({}, { __mode = "k" })
 local visible = setmetatable({}, { __mode = "k" })
 
 local function update_time(doc)
-  local info = system.get_file_info(doc.filename)
+  local info = system.get_file_info(doc.abs_filename)
   times[doc] = info and info.modified
 end
 
@@ -85,7 +85,7 @@ end
 -- Reloads a doc whose file changed on disk, or asks first when it has unsaved
 -- changes (right away when `shown`, or when the doc is the active one).
 local function check_changed(doc, shown)
-  local info = system.get_file_info(doc.filename or "")
+  local info = system.get_file_info(doc.abs_filename or "")
   if info and times[doc] ~= info.modified then
     if not doc:is_dirty() and not config.plugins.autoreload.always_show_nagview then
       reload_doc(doc)

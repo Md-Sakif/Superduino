@@ -1,16 +1,27 @@
 -- A file changed on disk while its tab was hidden is reloaded when the tab is
 -- shown again; with unsaved edits it asks once, and "No" keeps the edits.
+-- The files are inside the open project, so their doc.filename is relative
+-- (and the editor's working directory is not the project).
 return {
   run = function(T)
     local core = require "core"
     local command = require "core.command"
     local function write(path, text) local fp = io.open(path, "w"); fp:write(text); fp:close() end
-    local a, b = T.dir .. "/a.txt", T.dir .. "/b.txt"
-    write(a, "old a\n"); write(b, "b\n")
+    local dir = T.home .. "/project"
+    local a, b = dir .. "/a.txt", dir .. "/b.txt"
+    if T.phase == 1 then
+      T.mkdir(dir)
+      write(a, "old a\n"); write(b, "b\n")
+      T.expect_restart()
+      core.open_project(dir)
+      return
+    end
     local view_a = core.root_view:open_doc(core.open_doc(a))
     local view_b = core.root_view:open_doc(core.open_doc(b))
     local node = core.root_view.root_node:get_node_for_view(view_a)
     T.eq(core.active_view, view_b, "a.txt is hidden behind b.txt")
+    T.eq(view_a.doc.filename, "a.txt", "the doc's filename is relative to the project")
+    T.check(system.absolute_path(".") ~= dir, "the working directory is not the project")
 
     -- file times may only have a resolution of one second
     T.wait(1.1)
