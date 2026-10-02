@@ -1,6 +1,7 @@
 -- The panel bar under the editor area, right of the left pane and above the
--- status bar: tabs that show or hide panels. For now one tab, Output, which
--- shows or hides the Output panel above the bar.
+-- status bar: tabs that show or hide the panels above it, one at a time: Output
+-- (the build output) and Terminal (the bundled terminal plugin's drawer, a shell
+-- in the project folder).
 local core = require "core"
 local command = require "core.command"
 local common = require "core.common"
@@ -20,13 +21,40 @@ local function output_visible()
   return OutputView.view ~= nil and OutputView.view.visible
 end
 
+local terminal_panel = require "plugins.arduino.terminal_panel"
+local terminal_open = terminal_panel.is_open
+local close_terminal = terminal_panel.close
+
+local function hide_output()
+  if output_visible() then OutputView.view:hide() end
+end
+
 PanelBar.TABS = {
   {
     id = "tab:output",
     text = "Output",
     active = output_visible,
     run = function()
-      if output_visible() then OutputView.view:hide() else OutputView.get():show() end
+      if output_visible() then
+        OutputView.view:hide()
+      else
+        close_terminal()
+        OutputView.get():show()
+      end
+    end,
+  },
+  {
+    id = "tab:terminal",
+    text = "Terminal",
+    available = function() return terminal_panel.available end,
+    active = terminal_open,
+    run = function()
+      if terminal_open() then
+        close_terminal()
+      else
+        hide_output()
+        terminal_panel.open()
+      end
     end,
   },
 }
@@ -53,9 +81,11 @@ function PanelBar:update()
   local x = self.position.x
   self.tabs = {}
   for _, tab in ipairs(PanelBar.TABS) do
+    if tab.available and not tab.available() then goto continue end
     local w = font:get_width(tab.text) + pad_x * 2
     table.insert(self.tabs, { tab = tab, x = x, y = self.position.y, w = w, h = self.size.y })
     x = x + w
+    ::continue::
   end
 end
 
@@ -127,6 +157,7 @@ end
 
 command.add(nil, {
   ["arduino:toggle-output"] = function() PanelBar.TABS[1].run() end,
+  ["arduino:toggle-terminal"] = function() PanelBar.TABS[2].run() end,
 })
 
 
