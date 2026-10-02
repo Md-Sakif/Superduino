@@ -1,6 +1,6 @@
 -- The Board panel in the left side pane, under the file tree: the open sketch's
--- vendor, family and board (clicking one opens Board Settings on its step), and its
--- changed settings with a Change Configuration link.
+-- vendor, family and board (clicking one opens Board Settings on its step), and a
+-- Manage Configuration link for the board's settings.
 local core = require "core"
 local common = require "core.common"
 local style = require "core.style"
@@ -24,8 +24,8 @@ BoardPanel.save_in_workspace = false
 
 -- what is shown for the open project; re-read when sketch.yaml changes
 local current = { dir = nil, checked = 0 }
--- the installed boards by board fqbn, and their settings (for their labels)
--- by board fqbn; boards are loaded again when sketch.yaml changes, e.g. after
+-- the installed boards by board fqbn, and their settings (to know whether a
+-- board has any) by board fqbn; boards are loaded again when sketch.yaml changes, e.g. after
 -- choosing a board of a newly installed family
 local boards, boards_state = {}, "unloaded"
 local settings = {}
@@ -80,19 +80,19 @@ end
 
 
 ---What the panel shows, or nil when the open project is not a sketch:
----{ rows = { { label, value, step } }, settings = { text, color }[], has_options?, message?, message_color? }
+---{ rows = { { label, value, step } }, has_options?, options_known?, message?, message_color? }
 ---`step` is the Board Settings step that changes the row.
 function BoardPanel.describe()
   local info = BoardPanel.current()
   if not info then return nil end
   if info.error then
-    return { message = "sketch.yaml cannot be read: " .. info.error, message_color = style.error, rows = {}, settings = {} }
+    return { message = "sketch.yaml cannot be read: " .. info.error, message_color = style.error, rows = {} }
   end
   if not info.fqbn then
-    return { message = "No board chosen yet.", message_color = style.warn, rows = {}, settings = {} }
+    return { message = "No board chosen yet.", message_color = style.warn, rows = {} }
   end
   load_boards()
-  local base, chosen = project.split_fqbn(info.fqbn)
+  local base = project.split_fqbn(info.fqbn)
   local vendor, arch = base:match("^([^:]+):([^:]+):")
   local board = boards[base]
   local result = {
@@ -101,36 +101,17 @@ function BoardPanel.describe()
       { label = "Family", value = board and board.arch_name or arch or "?", step = 2 },
       { label = "Board", value = board and board.name or base, step = 3 },
     },
-    settings = {},
   }
   if boards_state == "loaded" and not board then
     result.message, result.message_color = "Not installed on this computer.", style.warn
   end
+  -- the changed settings are not listed (many would crowd the pane); only
+  -- whether the board has any, for Manage Configuration
   if board then
     load_settings(base)
-    local known = type(settings[base]) == "table" and settings[base] or {}
     result.options_known = type(settings[base]) == "table"
-    result.has_options = #known > 0
-    for _, option in ipairs(known) do
-      local value = chosen[option.option]
-      if value then
-        local label = value
-        for _, entry in ipairs(option.values) do
-          if entry.value == value then label = entry.label end
-        end
-        table.insert(result.settings, { option.label .. ": " .. label, style.text })
-      end
-    end
+    result.has_options = result.options_known and #settings[base] > 0
   end
-  -- settings the board does not know, or not loaded yet
-  local known_keys = {}
-  for _, option in ipairs(type(settings[base]) == "table" and settings[base] or {}) do known_keys[option.option] = true end
-  local rest = {}
-  for key, value in pairs(chosen) do
-    if not known_keys[key] then table.insert(rest, key .. "=" .. value) end
-  end
-  table.sort(rest)
-  for _, text in ipairs(rest) do table.insert(result.settings, { text, style.dim }) end
   return result
 end
 
@@ -169,7 +150,7 @@ function BoardPanel:layout(content)
   local font, pad_x, pad_y = style.font, style.padding.x, style.padding.y
   local line_h = self:line_height()
   local x, w = self.position.x, self.size.x
-  local L = { header_y = pad_y, rows = {}, settings = {}, targets = {} }
+  local L = { header_y = pad_y, rows = {}, targets = {} }
   local y = pad_y + line_h
   local label_w = 0
   for _, row in ipairs(content.rows) do label_w = math.max(label_w, font:get_width(row.label)) end
@@ -186,14 +167,10 @@ function BoardPanel:layout(content)
       run = function() BoardPanel.open_settings(row.step) end })
     y = y + line_h
   end
-  for _, line in ipairs(content.settings) do
-    table.insert(L.settings, { line = line, y = y })
-    y = y + line_h
-  end
   -- a link to the board's configuration, or "Set Board..." when there is no board yet
   if #content.rows == 0 or content.has_options then
     L.wide = { id = "change:options", y = y,
-      text = #content.rows == 0 and "Set Board..." or "Change Configuration..." }
+      text = #content.rows == 0 and "Set Board..." or "Manage Configuration..." }
     table.insert(L.targets, { id = L.wide.id, x = x, y = y, w = w, h = line_h,
       run = function() BoardPanel.open_settings(#content.rows == 0 and 1 or 4) end })
     y = y + line_h
@@ -277,9 +254,6 @@ function BoardPanel:draw()
     if hovered then renderer.draw_rect(x, y + r.y, w, line_h, style.line_highlight) end
     text_at(style.dim, r.row.label, x + pad_x, r.y, w)
     text_at(hovered and style.accent or style.text, r.row.value, r.value_x, r.y, x + w - pad_x - r.value_x)
-  end
-  for _, s in ipairs(L.settings) do
-    text_at(s.line[2], s.line[1], x + pad_x, s.y, w - pad_x * 2)
   end
   if L.no_options_y then text_at(style.dim, "This board has no options.", x + pad_x, L.no_options_y, w - pad_x * 2) end
   if L.wide then

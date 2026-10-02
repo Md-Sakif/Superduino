@@ -35,13 +35,12 @@ return {
     end
 
     local BoardPanel = require "plugins.arduino.board_panel"
-    -- the panel's text: message, rows, then settings
+    -- the panel's text: message, then rows
     local function panel_text()
       local content = BoardPanel.describe()
       if not content then return "" end
       local parts = { content.message }
       for _, row in ipairs(content.rows) do table.insert(parts, row.label .. " " .. row.value) end
-      for _, line in ipairs(content.settings) do table.insert(parts, line[1]) end
       return table.concat(parts, " | ")
     end
     -- clicks a row ("change:1".."change:3") or the configuration link ("change:options") of the panel
@@ -71,7 +70,7 @@ return {
     T.wait_until(function() return panel_text() == UNO end, 10, "the board in the panel")
     T.eq(panel_text(), UNO, "the panel shows vendor, family and board by name")
     T.wait_until(function() return BoardPanel.view.current_layout.no_options_y end, 10, "UNO settings")
-    T.eq(BoardPanel.view.current_layout.wide, nil, "no Change Configuration for a board without options")
+    T.eq(BoardPanel.view.current_layout.wide, nil, "no Manage Configuration for a board without options")
     local treeview = require "plugins.treeview"
     local panel = BoardPanel.view
     T.check(panel ~= nil, "the panel was added")
@@ -131,20 +130,21 @@ return {
     T.match(text, "^# notes about this sketch", "comments are kept")
     T.match(text, "  debug:\n    fqbn: arduino:avr:nano:cpu=atmega168\n", "other profiles are kept")
     T.match(text, "default_profile: nano\n", "the default follows the rename")
-    T.wait_until(function() return panel_text():find("Processor", 1, true) end, 5, "the panel to update")
-    T.eq(panel_text(), "Vendor Arduino | Family Arduino AVR Boards | Board Arduino Nano | Processor: ATmega328P (Old Bootloader)",
-      "the panel shows the new board and its changed setting")
-    T.wait_until(function() return BoardPanel.view.current_layout.wide end, 5, "Change Configuration")
+    T.wait_until(function() return panel_text():find("Nano", 1, true) end, 5, "the panel to update")
+    T.eq(panel_text(), "Vendor Arduino | Family Arduino AVR Boards | Board Arduino Nano",
+      "the panel shows the new board, not its changed settings")
+    T.wait_until(function() return BoardPanel.view.current_layout.wide end, 5, "Manage Configuration")
+    T.eq(BoardPanel.view.current_layout.wide.text, "Manage Configuration...", "the link is named Manage Configuration")
     T.shot("panel")
 
-    -- Change Configuration reopens the page on the options step with the saved choice;
+    -- Manage Configuration reopens the page on the options step with the saved choice;
     -- then a board of another family
     click_panel("change:options")
     v = T.wait_until(function()
       local view = core.active_view
       return tostring(view) == "NewProjectView" and view.edit and not view.loading and view
-    end, 10, "Board Settings from Change Configuration")
-    T.eq(v.step, 4, "Change Configuration opens the options step")
+    end, 10, "Board Settings from Manage Configuration")
+    T.eq(v.step, 4, "Manage Configuration opens the options step")
     T.wait_until(function() return v.board_options and not v.board_options.loading end, 10, "settings")
     T.eq(v:get_list()[1].detail, "ATmega328P (Old Bootloader)", "the saved setting is chosen")
     crumb = v.current_layout.crumbs[1]
