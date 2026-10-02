@@ -218,6 +218,8 @@ end
 
 function OutputView:draw()
   if self.size.y < 1 then return end
+  -- positions change while the panel slides open or closed
+  self:layout()
   self:draw_background(style.background)
   local run = build.last
   local x, y, w = self.position.x, self.position.y, self.size.x

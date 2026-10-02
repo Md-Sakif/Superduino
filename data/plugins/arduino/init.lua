@@ -13,6 +13,7 @@ local access = require "plugins.arduino.access"
 local managed = require "plugins.arduino.managed_cli"
 local BoardPanel = require "plugins.arduino.board_panel"
 local BuildPanel = require "plugins.arduino.build_panel"
+local PanelBar = require "plugins.arduino.panel_bar"
 require "plugins.arduino.access_ui"
 
 
@@ -252,6 +253,7 @@ EmptyView.add_section({
 BoardPanel.dock()
 -- docked after the Board panel, so it ends up between it and the file tree
 BuildPanel.dock()
+PanelBar.dock()
 keymap.add({
   ["ctrl+b"] = "arduino:build",
   ["ctrl+u"] = "arduino:upload",
