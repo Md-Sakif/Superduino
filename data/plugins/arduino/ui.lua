@@ -16,6 +16,47 @@ function ui.heading_font()
 end
 
 
+local icon_font, icon_size
+---Superduino's own icons (data/fonts/superduino-icons.ttf, made by
+---scripts/make-superduino-icons.py), as large as the editor's icons:
+---"V" check mark (Build), "U" right arrow (Upload).
+function ui.icon_font()
+  local size = style.icon_font:get_size()
+  if icon_size ~= size then
+    icon_font = renderer.font.load(DATADIR .. "/fonts/superduino-icons.ttf", size,
+      { antialiasing = "grayscale", hinting = "full" })
+    icon_size = size
+  end
+  return icon_font
+end
+
+
+---Draws a borderless button: an optional icon and a label, highlighted when hovered.
+---@param button { x: number, y: number, w: number, h: number, text: string, icon?: string, icon_font?: renderer.font, enabled: boolean }
+---@param hovered boolean
+function ui.draw_flat_button(button, hovered)
+  local enabled = button.enabled ~= false
+  if hovered and enabled then
+    renderer.draw_rect(button.x, button.y, button.w, button.h, style.line_highlight)
+  end
+  local color = not enabled and style.dim or (hovered and style.accent or style.text)
+  local x = button.x + style.padding.x
+  if button.icon then
+    x = common.draw_text(button.icon_font or ui.icon_font(), color, button.icon, "left", x, button.y, 0, button.h)
+    x = x + style.padding.x / 3
+  end
+  common.draw_text(style.font, color, button.text, "left", x, button.y, 0, button.h)
+end
+
+
+---Width of a borderless button with its icon and label.
+function ui.flat_button_width(text, icon, font)
+  local w = style.font:get_width(text) + style.padding.x * 2
+  if icon then w = w + (font or ui.icon_font()):get_width(icon) + style.padding.x / 3 end
+  return w
+end
+
+
 function ui.draw_border(x, y, w, h, color)
   local t = math.max(1, math.floor(SCALE))
   renderer.draw_rect(x, y, w, t, color)

@@ -133,24 +133,26 @@ function BuildPanel:layout(sketch)
   local x, w = self.position.x, self.size.x
   local L = { header_y = pad_y, targets = {}, buttons = {} }
   local y = pad_y + line_h
-  local running = build.running() and build.last.dir == sketch.dir
-  local can_build = sketch.fqbn ~= nil and not build.running()
-  local function add_button(id, text, bx, bw, enabled, run)
-    local b = { id = id, text = text, x = bx, y = y + 2, w = bw, h = line_h + pad_y / 2, enabled = enabled }
-    table.insert(L.buttons, b)
-    if enabled then table.insert(L.targets, { id = id, x = b.x, y = b.y, w = b.w, h = b.h, run = run }) end
-  end
-  local inner_w = w - pad_x * 2
-  if running then
-    add_button("build:cancel", build.last.kind == "upload" and "Cancel Upload" or "Cancel Build", x + pad_x, inner_w,
-      true, build.cancel)
+  -- borderless buttons with the Arduino IDE's icons: a check mark to build (verify),
+  -- an arrow to upload; Cancel while running
+  local specs
+  if build.running() then
+    specs = { { id = "build:cancel", text = build.last.kind == "upload" and "Cancel Upload" or "Cancel Build",
+      icon = "C", icon_font = style.icon_font, run = build.cancel } }
   else
-    local half = math.floor((inner_w - pad_x / 2) / 2)
-    add_button("build:build", "Build", x + pad_x, half, can_build, BuildPanel.build)
-    add_button("build:upload", "Upload", x + pad_x + half + pad_x / 2, inner_w - half - pad_x / 2, can_build,
-      BuildPanel.upload)
+    specs = {
+      { id = "build:build", text = "Build", icon = "V", run = BuildPanel.build, enabled = sketch.fqbn ~= nil },
+      { id = "build:upload", text = "Upload", icon = "U", run = BuildPanel.upload, enabled = sketch.fqbn ~= nil },
+    }
   end
-  y = y + line_h + pad_y
+  -- one row each, clickable across the pane like the Port row
+  for _, spec in ipairs(specs) do
+    local b = { id = spec.id, text = spec.text, icon = spec.icon, icon_font = spec.icon_font, x = x, y = y,
+      w = w, h = line_h, enabled = spec.enabled ~= false }
+    table.insert(L.buttons, b)
+    if b.enabled then table.insert(L.targets, { id = b.id, x = b.x, y = b.y, w = b.w, h = b.h, run = spec.run }) end
+    y = y + line_h
+  end
   -- the port row is clickable as a whole
   L.port_y = y
   table.insert(L.targets, { id = "build:port", x = x, y = y, w = w, h = line_h,
@@ -240,8 +242,8 @@ function BuildPanel:draw()
 
   text_at(style.dim, "BUILD", x + pad_x, L.header_y, w)
   for _, b in ipairs(L.buttons) do
-    ui.draw_button({ x = b.x, y = y + b.y, w = b.w, h = b.h, text = b.text, enabled = b.enabled },
-      self.hovered_id == b.id, false)
+    ui.draw_flat_button({ x = b.x, y = y + b.y, w = b.w, h = b.h, text = b.text, icon = b.icon,
+      icon_font = b.icon_font, enabled = b.enabled }, self.hovered_id == b.id)
   end
 
   local hovered = hover_row("build:port", L.port_y)

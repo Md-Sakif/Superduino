@@ -1,5 +1,6 @@
 -- The Build section of the left pane builds and uploads the open sketch, follows
--- connected ports, and the Output panel shows the output with clickable errors.
+-- connected ports and shows the result, and the Output panel shows the output
+-- with clickable errors.
 local SKETCH = "void setup() {\n}\n\nvoid loop() {\n}\n"
 
 return {
