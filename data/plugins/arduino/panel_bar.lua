@@ -1,13 +1,15 @@
 -- The panel bar under the editor area, right of the left pane and above the
 -- status bar: tabs that show or hide the panels above it, one at a time: Output
--- (the build output) and Terminal (the bundled terminal plugin's drawer, a shell
--- in the project folder).
+-- (the build output), Serial Monitor (what the board prints) and Terminal (the
+-- bundled terminal plugin's drawer, a shell in the project folder).
 local core = require "core"
 local command = require "core.command"
 local common = require "core.common"
 local style = require "core.style"
 local View = require "core.view"
 local OutputView = require "plugins.arduino.output_view"
+local SerialView = require "plugins.arduino.serial_view"
+local terminal_panel = require "plugins.arduino.terminal_panel"
 
 ---@class arduino.panelbar : core.view
 local PanelBar = View:extend()
@@ -21,40 +23,31 @@ local function output_visible()
   return OutputView.view ~= nil and OutputView.view.visible
 end
 
-local terminal_panel = require "plugins.arduino.terminal_panel"
-local terminal_open = terminal_panel.is_open
-local close_terminal = terminal_panel.close
-
-local function hide_output()
-  if output_visible() then OutputView.view:hide() end
-end
-
+-- (showing a panel hides the others, see bottom_panels)
 PanelBar.TABS = {
   {
     id = "tab:output",
     text = "Output",
     active = output_visible,
     run = function()
-      if output_visible() then
-        OutputView.view:hide()
-      else
-        close_terminal()
-        OutputView.get():show()
-      end
+      if output_visible() then OutputView.view:hide() else OutputView.get():show() end
+    end,
+  },
+  {
+    id = "tab:serial",
+    text = "Serial Monitor",
+    active = SerialView.is_open,
+    run = function()
+      if SerialView.is_open() then SerialView.view:hide() else SerialView.get():show(true) end
     end,
   },
   {
     id = "tab:terminal",
     text = "Terminal",
     available = function() return terminal_panel.available end,
-    active = terminal_open,
+    active = terminal_panel.is_open,
     run = function()
-      if terminal_open() then
-        close_terminal()
-      else
-        hide_output()
-        terminal_panel.open()
-      end
+      if terminal_panel.is_open() then terminal_panel.close() else terminal_panel.open() end
     end,
   },
 }
@@ -157,7 +150,7 @@ end
 
 command.add(nil, {
   ["arduino:toggle-output"] = function() PanelBar.TABS[1].run() end,
-  ["arduino:toggle-terminal"] = function() PanelBar.TABS[2].run() end,
+  ["arduino:toggle-terminal"] = function() PanelBar.TABS[3].run() end,
 })
 
 

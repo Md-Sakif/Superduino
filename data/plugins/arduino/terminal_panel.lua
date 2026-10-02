@@ -6,6 +6,7 @@ local common = require "core.common"
 local config = require "core.config"
 local style = require "core.style"
 local ui = require "plugins.arduino.ui"
+local bottom_panels = require "plugins.arduino.bottom_panels"
 
 local terminal_panel = {}
 
@@ -37,6 +38,7 @@ end
 
 ---Opens the drawer (made the first time) and gives the shell the keyboard.
 function terminal_panel.open()
+  bottom_panels.showing("terminal")
   if not terminal_panel.is_open() then command.perform("terminal:toggle-drawer") end
 end
 
@@ -45,6 +47,9 @@ end
 function terminal_panel.close()
   if terminal_panel.is_open() then command.perform("terminal:toggle-drawer") end
 end
+
+
+bottom_panels.add({ id = "terminal", is_open = terminal_panel.is_open, close = terminal_panel.close })
 
 
 -- Header links of a terminal view (only the drawer can be hidden), in screen coordinates.

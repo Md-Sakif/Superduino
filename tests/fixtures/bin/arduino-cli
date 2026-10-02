@@ -60,7 +60,10 @@ DEFAULT_STATE = {
     # connected boards for `board list`: {address, label, protocol, protocol_label, boards: [[name, fqbn]]}
     "ports": [],
     "compile_slow": False,     # compiling takes long (for cancel tests)
-    "upload_denied": False,    # opening the port fails with "Permission denied"     # `board details` fails (e.g. a broken boards.txt)
+    "upload_denied": False,    # opening the port fails with "Permission denied"
+    "monitor_denied": False,   # the serial monitor cannot open the port: "Permission denied"
+    # text the fake board prints in the serial monitor, appended to by tests while it runs
+    "serial_feed": "",     # `board details` fails (e.g. a broken boards.txt)
     # board settings (menus) returned by `board details`, keyed by fqbn; the first value is the default
     "board_options": {
         "arduino:avr:nano": [
@@ -299,6 +302,84 @@ def board_list_watch():
         time.sleep(0.1)
 
 
+def monitor_lock(port):
+    return os.path.join(TEST_DIR, "monitor-%s.lock" % port.strip("/").replace("/", "_"))
+
+
+def port_in_use(port):
+    """Whether a fake serial monitor still holds the port (like the real port lock)."""
+    try:
+        pid = int(open(monitor_lock(port)).read())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def serial_monitor(state, args):
+    """Like `monitor -p PORT --config baudrate=N --quiet`: a fake board that greets,
+    prints what tests append to serial_feed, and answers what it is sent."""
+    import signal
+    import threading
+    port = args[args.index("-p") + 1]
+    config = dict(kv.split("=", 1) for kv in args[args.index("--config") + 1].split(",")) if "--config" in args else {}
+    baud = config.get("baudrate", "9600")
+    if port not in [p["address"] for p in state["ports"]]:
+        sys.stderr.write("Port monitor error: command 'open' failed: Invalid serial port: "
+                         "open %s: no such file or directory\n" % port)
+        sys.exit(1)
+    if state["monitor_denied"]:
+        sys.stderr.write("Port monitor error: command 'open' failed: Invalid serial port: "
+                         "open %s: permission denied\n" % port)
+        sys.exit(1)
+    if port_in_use(port):
+        sys.stderr.write("Port monitor error: command 'open' failed: Serial port busy\n")
+        sys.exit(1)
+    lock = monitor_lock(port)
+    with open(lock, "w") as fp:
+        fp.write(str(os.getpid()))
+
+    def leave(code):
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+        sys.stdout.flush()
+        os._exit(code)
+
+    signal.signal(signal.SIGTERM, lambda *_: leave(0))
+    write_lock = threading.Lock()
+
+    def emit(text):
+        with write_lock:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    def answer():
+        while True:
+            data = os.read(0, 4096)
+            if not data:
+                return
+            emit("got %s\r\n" % json.dumps(data.decode("utf-8", "replace")))
+
+    threading.Thread(target=answer, daemon=True).start()
+    emit("Hello at %s baud\r\n" % baud)
+    fed = len(state.get("serial_feed", ""))
+    while True:
+        time.sleep(0.05)
+        try:
+            current = load_state()
+        except ValueError:
+            continue  # being written by a test
+        if port not in [p["address"] for p in current["ports"]]:
+            sys.stderr.write("Port monitor error: EOF\n")
+            leave(1)
+        feed = current.get("serial_feed", "")
+        if len(feed) > fed:
+            emit(feed[fed:])
+        fed = len(feed)
+
+
 def compile_sketch(state, args):
     """Like `compile [--upload -p PORT] SKETCH`, with gcc-style messages for marked lines."""
     port = args[args.index("-p") + 1] if "-p" in args else None
@@ -334,6 +415,10 @@ def compile_sketch(state, args):
         return
     if port not in [p["address"] for p in state["ports"]]:
         sys.stderr.write('avrdude: ser_open(): can\'t open device "%s": No such file or directory\n' % port)
+        sys.stderr.write("Failed uploading: uploading error: exit status 1\n")
+        sys.exit(1)
+    if port_in_use(port):
+        sys.stderr.write('avrdude: ser_open(): can\'t open device "%s": Device or resource busy\n' % port)
         sys.stderr.write("Failed uploading: uploading error: exit status 1\n")
         sys.exit(1)
     if state["upload_denied"]:
@@ -431,6 +516,8 @@ def main(argv):
         if "--watch" in args or "-w" in args:
             board_list_watch()
         out({"detected_ports": [port_json(p) for p in state["ports"]]})
+    elif cmd[:1] == ["monitor"]:
+        serial_monitor(state, args)
     elif cmd[:1] == ["compile"]:
         compile_sketch(state, args)
     elif cmd == ["core", "install"]:

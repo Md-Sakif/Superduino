@@ -90,7 +90,8 @@ end
 
 ---Starts an arduino-cli command without waiting for it.
 ---@param args string[] Arguments passed to arduino-cli.
----@param options? { path?: string } `path` defaults to `cli.path`.
+---@param options? { path?: string, stdin?: boolean } `path` defaults to `cli.path`; `stdin`
+---gives the process a standard input to write to.
 ---@return process? proc
 ---@return string? error
 function cli.start(args, options)
@@ -98,7 +99,9 @@ function cli.start(args, options)
   if not path then return nil, "arduino-cli is not configured" end
   local command = { path }
   for _, arg in ipairs(args) do table.insert(command, arg) end
-  local ok, proc = pcall(process.start, command, { stdin = process.REDIRECT_DISCARD })
+  -- standard input is closed unless asked for (`options.stdin`; a pipe by default)
+  local ok, proc = pcall(process.start, command,
+    { stdin = not (options and options.stdin) and process.REDIRECT_DISCARD or nil })
   if not ok then return nil, tostring(proc) end
   return proc
 end

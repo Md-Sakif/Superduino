@@ -6,6 +6,7 @@ local common = require "core.common"
 local style = require "core.style"
 local View = require "core.view"
 local build = require "plugins.arduino.build"
+local bottom_panels = require "plugins.arduino.bottom_panels"
 local ui = require "plugins.arduino.ui"
 
 ---@class arduino.outputview : core.view
@@ -57,6 +58,7 @@ end
 
 
 function OutputView:show()
+  bottom_panels.showing("output")
   if not self.visible then
     self.visible = true
     self.scroll.to.y = math.huge
@@ -265,6 +267,13 @@ function OutputView.get()
   end
   return OutputView.view
 end
+
+
+bottom_panels.add({
+  id = "output",
+  is_open = function() return OutputView.view ~= nil and OutputView.view.visible end,
+  close = function() OutputView.view:hide() end,
+})
 
 
 -- show the panel when a build starts, keep it when it fails

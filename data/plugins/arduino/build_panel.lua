@@ -74,7 +74,7 @@ function BuildPanel.choose_port(on_chosen)
     end
     return list
   end
-  core.command_view:enter("Upload Port", {
+  core.command_view:enter("Board Port", {
     submit = function(text, item)
       local address = item and item.text or text:gsub("^%s+", ""):gsub("%s+$", "")
       if address == "" then return end
