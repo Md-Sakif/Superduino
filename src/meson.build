@@ -132,3 +132,16 @@ executable('superduino',
     install: true,
     win_subsystem: 'windows',
 )
+
+# Native part of the bundled terminal plugin (data/plugins/terminal), loaded by
+# Lite XL as plugins/terminal/libterminal.<so|dll> through the plugin API header.
+libutil = cc.find_library('util', required : false)
+shared_module('libterminal',
+    'plugins' / 'terminal' / 'libterminal.c',
+    name_prefix: '',
+    name_suffix: host_machine.system() == 'windows' ? 'dll' : 'so',
+    include_directories: include_directories('..' / 'resources' / 'include'),
+    dependencies: host_machine.system() == 'windows' ? [] : [libutil],
+    install_dir: lite_datadir / 'plugins' / 'terminal',
+    install: true,
+)
