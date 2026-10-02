@@ -1,7 +1,8 @@
 -- The panel bar under the editor area, right of the left pane and above the
 -- status bar: tabs that show or hide the panels above it, one at a time: Output
--- (the build output), Serial Monitor (what the board prints) and Terminal (the
--- bundled terminal plugin's drawer, a shell in the project folder).
+-- (the build output), Serial Monitor (what the board prints), Serial Plotter
+-- (the numbers it prints, as lines) and Terminal (the bundled terminal plugin's
+-- drawer, a shell in the project folder).
 local core = require "core"
 local command = require "core.command"
 local common = require "core.common"
@@ -9,6 +10,7 @@ local style = require "core.style"
 local View = require "core.view"
 local OutputView = require "plugins.arduino.output_view"
 local SerialView = require "plugins.arduino.serial_view"
+local PlotView = require "plugins.arduino.serial_plot_view"
 local terminal_panel = require "plugins.arduino.terminal_panel"
 
 ---@class arduino.panelbar : core.view
@@ -39,6 +41,14 @@ PanelBar.TABS = {
     active = SerialView.is_open,
     run = function()
       if SerialView.is_open() then SerialView.view:hide() else SerialView.get():show(true) end
+    end,
+  },
+  {
+    id = "tab:plotter",
+    text = "Serial Plotter",
+    active = PlotView.is_open,
+    run = function()
+      if PlotView.is_open() then PlotView.view:hide() else PlotView.get():show() end
     end,
   },
   {
@@ -150,7 +160,7 @@ end
 
 command.add(nil, {
   ["arduino:toggle-output"] = function() PanelBar.TABS[1].run() end,
-  ["arduino:toggle-terminal"] = function() PanelBar.TABS[3].run() end,
+  ["arduino:toggle-terminal"] = function() PanelBar.TABS[4].run() end,
 })
 
 

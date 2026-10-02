@@ -48,6 +48,9 @@ monitor.paused = nil
 monitor.waiting = nil
 ---Functions called when the monitor pauses for an upload and when it resumes.
 monitor.on_pause, monitor.on_resume = {}, {}
+---Functions called with every complete received line (e.g. the plotter).
+---@type fun(line: arduino.serial_line)[]
+monitor.on_line = {}
 
 -- considered connected when arduino-cli is still running after this long
 -- (with --quiet it prints nothing when the port opens)
@@ -208,7 +211,9 @@ function monitor.receive(data)
   while true do
     local s = text:find("\n", 1, true)
     if not s then break end
-    table.insert(monitor.lines, { text = printable(text:sub(1, s - 1)), kind = "rx", time = time })
+    local line = { text = printable(text:sub(1, s - 1)), kind = "rx", time = time }
+    table.insert(monitor.lines, line)
+    for _, fn in ipairs(monitor.on_line) do core.try(fn, line) end
     text = text:sub(s + 1)
     time = now()
   end

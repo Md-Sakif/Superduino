@@ -257,20 +257,27 @@ function SerialView:update()
 end
 
 
----Title of the header and its color.
-function SerialView:title()
+---The connection's state for a header, e.g. "/dev/ttyUSB0 at 115200 baud", and its color.
+function SerialView.state_text()
   local state = monitor.state()
   local session = monitor.session
   if state == "connected" then
-    return string.format("Serial Monitor: %s at %d baud", session.port, session.baud), style.good
+    return string.format("%s at %d baud", session.port, session.baud), style.good
   elseif state == "connecting" then
-    return "Serial Monitor: connecting to " .. session.port .. "...", style.accent
+    return "connecting to " .. session.port .. "...", style.accent
   elseif state == "paused" then
-    return "Serial Monitor: paused while uploading", style.warn
+    return "paused while uploading", style.warn
   elseif state == "waiting" then
-    return "Serial Monitor: waiting for " .. monitor.waiting.port .. " to come back", style.warn
+    return "waiting for " .. monitor.waiting.port .. " to come back", style.warn
   end
-  return "Serial Monitor: not connected", style.dim
+  return "not connected", style.dim
+end
+
+
+---Title of the header and its color.
+function SerialView:title()
+  local text, color = SerialView.state_text()
+  return "Serial Monitor: " .. text, color
 end
 
 
@@ -474,16 +481,18 @@ function SerialView.is_open()
 end
 
 
-bottom_panels.add({ id = "serial", is_open = SerialView.is_open, close = function() SerialView.view:hide() end })
+bottom_panels.add({ id = "serial", is_open = SerialView.is_open, close = function() SerialView.view:hide() end,
+  show = function() SerialView.get():show() end })
 
 
--- an upload hides the monitor behind the Output panel; bring it back when the
--- upload worked
-local shown_before_upload = false
-table.insert(monitor.on_pause, function() shown_before_upload = SerialView.is_open() end)
+-- an upload hides the Serial Monitor or Plotter behind the Output panel; bring
+-- it back when the upload worked
+local shown_before_upload = nil
+table.insert(monitor.on_pause, function() shown_before_upload = bottom_panels.shown() end)
 table.insert(monitor.on_resume, function(run)
-  if shown_before_upload and run.state == "done" then SerialView.get():show() end
-  shown_before_upload = false
+  local id = shown_before_upload
+  shown_before_upload = nil
+  if (id == "serial" or id == "plotter") and run.state == "done" then bottom_panels.show(id) end
 end)
 
 
