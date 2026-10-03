@@ -117,6 +117,31 @@ return {
     T.eq(hint and hint.command, "arduino:allow-serial-port-access", "a hint offers to allow serial port access")
     T.fake_cli_set("upload_denied", false)
 
+    -- the board does not answer: a Nano gets the old bootloader hint, others a general one
+    local function upload_hint()
+      T.key("ctrl+u")
+      finished("the upload without an answer")
+      for _, line in ipairs(build.last.lines) do if line.kind == "hint" then return line end end
+    end
+    local function set_board(fqbn)
+      T.write_file(dir .. "/sketch.yaml", "profiles:\n  b:\n    fqbn: " .. fqbn
+        .. "\n    platforms:\n      - platform: arduino:avr (1.8.8)\n\ndefault_profile: b\n")
+      T.wait_until(function() return BuildPanel.sketch().fqbn == fqbn end, 5, "the board " .. fqbn)
+    end
+    T.fake_cli_set("upload_no_sync", true)
+    hint = upload_hint()
+    T.match(hint and hint.text or "", "did not answer", "a board that does not answer gets a hint")
+    T.eq(hint and hint.command, nil, "a general one for an Uno")
+    set_board("arduino:avr:nano")
+    hint = upload_hint()
+    T.eq(hint and hint.command, "arduino:board-settings", "a Nano is offered the old bootloader setting")
+    T.match(hint and hint.text or "", "Old Bootloader", "and the hint names it")
+    set_board("arduino:avr:nano:cpu=atmega328old")
+    hint = upload_hint()
+    T.eq(hint and hint.command, nil, "not when the old bootloader is already chosen")
+    T.fake_cli_set("upload_no_sync", false)
+    set_board("arduino:avr:uno")
+
     -- two other boards: none matches, so the port is chosen by the user and remembered
     T.fake_cli_set("ports", { { address = "/dev/ttyACM0" }, { address = "/dev/ttyUSB5" } })
     T.wait_until(function() return #ports.list == 2 end, 5, "the new ports")

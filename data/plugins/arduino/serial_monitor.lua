@@ -202,6 +202,15 @@ local function printable(text)
 end
 
 
+---How many bytes of received data look like noise: control characters, and
+---bytes of broken UTF-8 (what a wrong baud rate gives).
+function monitor.noise(data)
+  local n = select(2, data:gsub("[%z\1-\8\11\12\14-\31\127]", ""))
+  if not utf8.len(data) then n = n + select(2, data:gsub("[\128-\255]", "")) end
+  return n
+end
+
+
 ---Adds received bytes: complete lines, and the start of the next one.
 ---@param data string
 function monitor.receive(data)
@@ -285,6 +294,25 @@ local function hint_for(text)
 end
 
 
+-- Bytes received before a connection is judged for noise, and the share of
+-- noise that suggests a wrong baud rate. The first moments are not judged:
+-- text the board printed before the port opened may come first, garbled.
+local NOISE_SAMPLE, NOISE_SHARE, NOISE_GRACE = 48, 0.25, 1.5
+
+-- Hints once per connection when what arrives is mostly noise.
+local function check_noise(session, data)
+  if session.noise_hinted or system.get_time() - session.started < NOISE_GRACE then return end
+  session.seen = (session.seen or 0) + #data
+  session.noise = (session.noise or 0) + monitor.noise(data)
+  if session.seen >= NOISE_SAMPLE and session.noise / session.seen >= NOISE_SHARE then
+    session.noise_hinted = true
+    monitor.add_note("hint", string.format("Unreadable text? The board may use another baud rate than %d (see "
+      .. "Serial.begin(...) in its sketch). Click here to choose the baud rate.", session.baud),
+      "arduino:serial-baud-rate")
+  end
+end
+
+
 ---Connects to a port; a connection to another port or at another baud rate is closed first.
 ---@param target { port: string, baud: integer, fqbn?: string, protocol?: string }
 ---@return boolean ok
@@ -328,6 +356,7 @@ function monitor.connect(target)
             monitor.add_note("info", string.format("Connected to %s at %d baud.", session.port, session.baud))
           end
           monitor.receive(out)
+          check_noise(session, out)
         end
         got = true
       end

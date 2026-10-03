@@ -41,7 +41,7 @@ end
 function BuildPanel.build()
   local sketch = BuildPanel.sketch()
   if not sketch or build.running() or not ready() then return end
-  build.start("build", sketch.dir)
+  build.start("build", sketch.dir, nil, sketch.fqbn)
 end
 
 
@@ -50,9 +50,9 @@ function BuildPanel.upload()
   local sketch = BuildPanel.sketch()
   if not sketch or build.running() or not ready() then return end
   if sketch.port then
-    build.start("upload", sketch.dir, sketch.port.address)
+    build.start("upload", sketch.dir, sketch.port.address, sketch.fqbn)
   else
-    BuildPanel.choose_port(function(address) build.start("upload", sketch.dir, address) end)
+    BuildPanel.choose_port(function(address) build.start("upload", sketch.dir, address, sketch.fqbn) end)
   end
 end
 

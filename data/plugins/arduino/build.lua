@@ -15,7 +15,7 @@ local build = {}
 ---@field command? string Command to run when the line is clicked (hints)
 
 ---The current or last run:
----{ kind = "build"|"upload", dir, port?, state = "running"|"done"|"failed"|"cancelled",
+---{ kind = "build"|"upload", dir, port?, fqbn?, state = "running"|"done"|"failed"|"cancelled",
 ---  lines = arduino.build_line[], errors, warnings, flash?, ram?, started, finished? }
 build.last = nil
 ---Functions called with the run when it starts and when it ends.
@@ -59,18 +59,28 @@ local function hints(run)
   local text = table.concat(all, "\n"):lower()
   local result = {}
   if run.kind == "upload" then
+    local fqbn = run.fqbn or ""
     if text:find("permission denied", 1, true) then
       table.insert(result, { kind = "hint", command = "arduino:allow-serial-port-access",
         text = "Your user may not be allowed to use serial ports. Click here to allow it (once, needs your password)." })
+    elseif text:find("resource busy", 1, true) or text:find("port is busy", 1, true) then
+      table.insert(result, { kind = "hint",
+        text = "Another program is using the port (e.g. another serial monitor). Close it and upload again." })
+    elseif (text:find("not in sync", 1, true) or text:find("not responding", 1, true))
+      and fqbn:match("^arduino:avr:nano") and not fqbn:find("atmega328old", 1, true) then
+      -- most Nano clones still have the old bootloader
+      table.insert(result, { kind = "hint", command = "arduino:board-settings",
+        text = "The board did not answer. Many Nano boards (most clones) need Processor: \"ATmega328P (Old "
+          .. "Bootloader)\". Click here to change it in Board Settings, then upload again." })
+    elseif text:find("not in sync", 1, true) or text:find("timed out", 1, true)
+      or text:find("failed to connect", 1, true) or text:find("not responding", 1, true) then
+      table.insert(result, { kind = "hint",
+        text = "The board did not answer. Check the board and port; some boards need a button pressed "
+          .. "(e.g. BOOT on ESP32) while uploading starts." })
     elseif text:find("no such file or directory", 1, true) or text:find("can't open device", 1, true)
       or text:find("could not open port", 1, true) then
       table.insert(result, { kind = "hint",
         text = "The port could not be opened. Check that the board is plugged in and choose its port again." })
-    elseif text:find("not in sync", 1, true) or text:find("timed out", 1, true)
-      or text:find("failed to connect", 1, true) then
-      table.insert(result, { kind = "hint",
-        text = "The board did not answer. Check the board and port; some boards need a button pressed "
-          .. "(e.g. BOOT on ESP32) while uploading starts." })
     end
   end
   if text:find("missing fqbn", 1, true) or text:find("no fqbn", 1, true) then
@@ -115,9 +125,10 @@ end
 ---@param kind "build"|"upload"
 ---@param dir string Sketch folder
 ---@param port? string Port address, for uploading
+---@param fqbn? string The sketch's board, for hints
 ---@return table? run
 ---@return string? error
-function build.start(kind, dir, port)
+function build.start(kind, dir, port, fqbn)
   if build.running() then return nil, "a build is already running" end
   if kind == "upload" and not port then return nil, "no port chosen" end
   save_sketch_docs(dir)
@@ -127,7 +138,7 @@ function build.start(kind, dir, port)
     table.insert(args, "-p")
     table.insert(args, port)
   end
-  local run = { kind = kind, dir = dir, port = port, state = "running", lines = {}, errors = 0, warnings = 0,
+  local run = { kind = kind, dir = dir, port = port, fqbn = fqbn, state = "running", lines = {}, errors = 0, warnings = 0,
     started = system.get_time() }
   build.last = run
   add_line(run, { kind = "command", text = "arduino-cli " .. table.concat(args, " ") })

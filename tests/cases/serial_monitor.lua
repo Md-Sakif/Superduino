@@ -51,6 +51,13 @@ return {
       end
     end
     local function connected() return monitor.state() == "connected" end
+    local function count_hints(text)
+      local n = 0
+      for _, line in ipairs(monitor.lines) do
+        if line.kind == "hint" and line.text:find(text, 1, true) then n = n + 1 end
+      end
+      return n
+    end
     -- the fake board prints what is appended to its feed
     local fed = ""
     local function feed(text)
@@ -135,6 +142,15 @@ return {
     T.eq(monitor.baud_for(dir), 57600, "a changed Serial.begin() wins")
     T.write_file(ino, SKETCH)
     T.eq(monitor.baud_for(dir), 9600, "the chosen rate again for the old Serial.begin()")
+
+    -- unreadable text (a wrong baud rate) gets a hint once
+    T.fake_cli_set("serial_noise", true)
+    T.wait_until(function() return has_line("Unreadable text", "hint") end, 10, "the noise hint")
+    local noise_hint = has_line("Unreadable text", "hint")
+    T.eq(noise_hint and noise_hint.command, "arduino:serial-baud-rate", "it offers the baud rate choice")
+    T.wait(1)
+    T.eq(count_hints("Unreadable text"), 1, "only once per connection")
+    T.fake_cli_set("serial_noise", false)
 
     -- an upload pauses the monitor (the port is free), then it connects again
     view:show(true)
