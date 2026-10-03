@@ -49,6 +49,16 @@ Cases named `real_*` use the network and the real arduino-cli (for example
 downloading it the way "Download arduino-cli for Me" does). They are skipped
 unless you run `SUPERDUINO_REAL_TESTS=1 tests/run.sh real`.
 
+`real_hardware` also needs an Arduino Nano (or clone) plugged in and an
+arduino-cli with Arduino AVR Boards installed; it overwrites the board's
+program. See the top of `tests/cases/real_hardware.lua`:
+
+```sh
+SUPERDUINO_REAL_TESTS=1 SUPERDUINO_HW_PORT=/dev/ttyUSB0 \
+SUPERDUINO_HW_CLI=/path/to/arduino-cli SUPERDUINO_HW_DATA=$HOME/.arduino15 \
+tests/run.sh --visible real_hardware
+```
+
 A case that restarts the editor (opening a project does) calls
 `T.expect_restart()` first; `run` is called again afterwards with
 `T.phase` increased by one.

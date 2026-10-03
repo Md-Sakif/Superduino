@@ -16,7 +16,8 @@
 #   --! FAKE_CLI_ON_PATH=0     (default 1: tests/fixtures/bin is on PATH)
 #
 # Cases named real_* use the network and the real arduino-cli; they only run
-# when SUPERDUINO_REAL_TESTS=1 is set.
+# when SUPERDUINO_REAL_TESTS=1 is set. real_hardware also needs a board, see
+# tests/cases/real_hardware.lua.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -81,6 +82,8 @@ for case_file in "$ROOT"/tests/cases/*.lua; do
     LITE_USERDIR="$dir/user" SUPERDUINO_TEST_DIR="$dir" SUPERDUINO_TEST_CASE="$case_file" \
     SUPERDUINO_TEST_FIXTURES="$ROOT/tests/fixtures" SUPERDUINO_TEST_VISIBLE="$VISIBLE" \
     SUPERDUINO_REAL_TESTS="${SUPERDUINO_REAL_TESTS:-0}" \
+    SUPERDUINO_HW_PORT="${SUPERDUINO_HW_PORT:-}" SUPERDUINO_HW_CLI="${SUPERDUINO_HW_CLI:-}" \
+    SUPERDUINO_HW_DATA="${SUPERDUINO_HW_DATA:-}" \
     "${extra_env[@]}" \
     timeout -s KILL "$TIMEOUT" "$BIN" >"$dir/stdout.log" 2>&1) 2>/dev/null
   seconds=$(printf "%.1f" "$(echo "$(date +%s.%N) - $start" | bc)")
