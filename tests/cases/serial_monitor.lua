@@ -129,6 +129,16 @@ return {
     click(view, "serial:timestamps")
     T.check(not monitor.timestamps(), "and off")
 
+    -- the list starts at the current rate: Enter keeps it without connecting again
+    local monitor_calls = select(2, T.fake_cli_calls():gsub("\nmonitor ", ""))
+    click(view, "serial:baud")
+    T.wait_until(function() return #core.command_view.suggestions > 1 end, 5, "the rates")
+    T.eq(core.command_view.suggestions[1].text, "115200", "the current rate is first")
+    T.key("return")
+    T.wait(0.5)
+    T.eq(select(2, T.fake_cli_calls():gsub("\nmonitor ", "")), monitor_calls, "the same rate does not connect again")
+    T.check(connected(), "and stays connected")
+
     -- another baud rate: connects again, and is remembered for the sketch
     click(view, "serial:baud")
     T.eq(core.active_view, core.command_view, "the baud rate is chosen from a list")

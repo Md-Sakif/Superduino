@@ -190,12 +190,14 @@ function SerialView.choose_baud()
   local sketch = BuildPanel.sketch()
   if not sketch then return end
   local current, _, file = monitor.baud_for(sketch.dir)
+  if monitor.session then current = monitor.session.baud end
   local detected = monitor.detect_baud(sketch.dir)
+  -- the current rate first, so Enter keeps it
   local items = {}
   for _, baud in ipairs(monitor.BAUD_RATES) do
     local info = baud == detected and ("Serial.begin in " .. tostring(file)) or nil
     if baud == current then info = info and (info .. ", current") or "current" end
-    table.insert(items, { text = tostring(baud), info = info })
+    table.insert(items, baud == current and 1 or #items + 1, { text = tostring(baud), info = info })
   end
   core.command_view:enter("Baud Rate", {
     text = "",
@@ -203,7 +205,9 @@ function SerialView.choose_baud()
       local baud = tonumber(item and item.text or text)
       if not baud then return end
       monitor.choose_baud(sketch.dir, baud)
-      if monitor.state() == "connected" or monitor.state() == "connecting" or monitor.state() == "waiting" then
+      -- connecting again restarts many boards (e.g. Uno, Nano): only for another rate
+      local state = monitor.state()
+      if baud ~= current and (state == "connected" or state == "connecting" or state == "waiting") then
         SerialView.connect()
       end
     end,
@@ -222,9 +226,12 @@ end
 ---Lets the user choose what is added after sent text.
 function SerialView.choose_line_ending()
   local current = monitor.line_ending()
+  -- the current one first, so Enter keeps it
   local items = {}
   for _, ending in ipairs(monitor.LINE_ENDINGS) do
-    table.insert(items, { text = ending.label, info = ending.id == current.id and "current" or nil, id = ending.id })
+    local is_current = ending.id == current.id
+    table.insert(items, is_current and 1 or #items + 1,
+      { text = ending.label, info = is_current and "current" or nil, id = ending.id })
   end
   core.command_view:enter("Line Ending", {
     submit = function(_, item) if item then monitor.set_line_ending(item.id) end end,
