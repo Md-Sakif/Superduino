@@ -18,6 +18,7 @@ local InstallPanel = require "plugins.arduino.install_panel"
 local IndexesPanel = require "plugins.arduino.indexes_panel"
 local TemplatesPanel = require "plugins.arduino.templates_panel"
 local OptionPanel = require "plugins.arduino.option_panel"
+local monitor = require "plugins.arduino.serial_monitor"
 
 ---@class arduino.newprojectview : core.view
 ---@field super core.view
@@ -594,6 +595,12 @@ function NewProjectView:save_board(close)
     if node then node:close_view(core.root_view.root_node, self) end
   end
   if not self:board_changed() then return finish() end
+  -- (a changed board under a connected Serial Monitor would restart it mid-session)
+  local locked = monitor.locked()
+  if locked then
+    self:set_message(locked, true)
+    return
+  end
   -- never overwrite edits of sketch.yaml that are not saved yet
   local path = self.edit.sketch.path or (self.edit.dir .. PATHSEP .. "sketch.yaml")
   for _, doc in ipairs(core.docs) do

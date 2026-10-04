@@ -137,14 +137,22 @@ return {
     first, last = plot.range()
     T.eq(last - first + 1, 50, "the last 50 samples are shown")
 
-    -- an upload hides it behind Output, and it comes back afterwards
+    -- connected, the plotter locks uploading and its baud rate like the monitor
+    local function link(id)
+      view:layout()
+      for _, l in ipairs(view.links) do if l.id == id then return l end end
+    end
+    T.eq(link("plot:baud").enabled, false, "the baud rate is locked while connected")
     core.set_active_view(core.root_view:get_primary_node().active_view)
     T.key("ctrl+u")
-    T.check(OutputView.view.visible and not view.visible, "the Output panel shows the upload")
-    T.wait_until(function() return build.last and build.last.state ~= "running" end, 15, "the upload")
-    T.eq(build.last.state, "done", "the upload succeeds")
+    T.wait(0.3)
+    T.eq(build.last, nil, "Ctrl+U does not upload while connected")
+    T.check(view.visible, "the plotter stays")
+    click(view, "plot:disconnect")
+    T.eq(monitor.state(), "disconnected", "Disconnect in the plotter frees the port")
+    T.check(link("plot:baud").enabled, "the baud rate unlocks")
+    click(view, "plot:connect")
     T.wait_until(function() return monitor.state() == "connected" end, 10, "the connection again")
-    T.check(view.visible, "the Serial Plotter shows again")
 
     -- Clear, and the shared connection between the tabs
     click(view, "plot:clear")

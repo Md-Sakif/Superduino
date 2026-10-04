@@ -69,11 +69,8 @@ end
 -- the open project is an Arduino sketch
 command.add(function() return BoardPanel.current() ~= nil end, {
   ["arduino:board-settings"] = function()
-    if cli.status ~= "ok" then
-      core.error("arduino-cli is not available; see the Arduino CLI section on the welcome screen")
-      return
-    end
-    NewProjectView.open_edit(core.root_project().path)
+    -- (says why when the Serial Monitor holds the port)
+    BoardPanel.open_settings()
   end,
 })
 

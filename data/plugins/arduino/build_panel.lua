@@ -9,6 +9,7 @@ local View = require "core.view"
 local cli = require "plugins.arduino.cli"
 local build = require "plugins.arduino.build"
 local ports = require "plugins.arduino.ports"
+local monitor = require "plugins.arduino.serial_monitor"
 local ui = require "plugins.arduino.ui"
 local BoardPanel = require "plugins.arduino.board_panel"
 local OutputView = require "plugins.arduino.output_view"
@@ -49,6 +50,11 @@ end
 function BuildPanel.upload()
   local sketch = BuildPanel.sketch()
   if not sketch or build.running() or not ready() then return end
+  local locked = monitor.locked()
+  if locked then
+    core.warn("%s", locked)
+    return
+  end
   if sketch.port then
     build.start("upload", sketch.dir, sketch.port.address, sketch.fqbn)
   else
@@ -142,7 +148,9 @@ function BuildPanel:layout(sketch)
   else
     specs = {
       { id = "build:build", text = "Build", icon = "V", run = BuildPanel.build, enabled = sketch.fqbn ~= nil },
-      { id = "build:upload", text = "Upload", icon = "U", run = BuildPanel.upload, enabled = sketch.fqbn ~= nil },
+      -- (not while the Serial Monitor holds the port)
+      { id = "build:upload", text = "Upload", icon = "U", run = BuildPanel.upload,
+        enabled = sketch.fqbn ~= nil and not monitor.locked() },
     }
   end
   -- one row each, clickable across the pane like the Port row
@@ -153,11 +161,21 @@ function BuildPanel:layout(sketch)
     if b.enabled then table.insert(L.targets, { id = b.id, x = b.x, y = b.y, w = b.w, h = b.h, run = spec.run }) end
     y = y + line_h
   end
-  -- the port row is clickable as a whole
+  -- the port row is clickable as a whole (not while the Serial Monitor uses the port)
   L.port_y = y
-  table.insert(L.targets, { id = "build:port", x = x, y = y, w = w, h = line_h,
-    run = function() BuildPanel.choose_port() end })
+  if not monitor.locked() then
+    table.insert(L.targets, { id = "build:port", x = x, y = y, w = w, h = line_h,
+      run = function() BuildPanel.choose_port() end })
+  end
   y = y + line_h
+  -- while the Serial Monitor holds the port: why Upload and the board are
+  -- locked, and a way to free it
+  if monitor.locked() then
+    L.serial_y = y
+    table.insert(L.targets, { id = "build:disconnect", x = x, y = y, w = w, h = line_h,
+      run = function() monitor.disconnect() end })
+    y = y + line_h
+  end
   local status, color, detail = self:status(sketch)
   if status then
     L.status = { text = status, color = color, detail = detail, y = y }
@@ -259,6 +277,16 @@ function BuildPanel:draw()
     text_at(hovered and style.accent or style.dim, "No board connected", value_x, L.port_y, value_w)
   end
 
+  if L.serial_y then
+    local disconnect_hovered = hover_row("build:disconnect", L.serial_y)
+    local label_end2 = text_at(style.dim, "Serial", x + pad_x, L.serial_y, w)
+    local state_x = label_end2 + pad_x / 2
+    local state_end = text_at(style.good, monitor.state() == "waiting" and "waiting" or "connected", state_x,
+      L.serial_y, x + w - pad_x - state_x)
+    text_at(disconnect_hovered and style.accent or style.dim, "Disconnect", state_end + pad_x / 2, L.serial_y,
+      x + w - pad_x - state_end - pad_x / 2)
+  end
+
   if L.status then
     local status_hovered = self.hovered_id == "build:status"
     if status_hovered then
@@ -292,7 +320,11 @@ table.insert(cli.on_checked, function() ports.stop() end)
 
 command.add(function() return BuildPanel.sketch() ~= nil end, {
   ["arduino:build"] = BuildPanel.build,
+  -- (says why when the Serial Monitor holds the port)
   ["arduino:upload"] = BuildPanel.upload,
+})
+
+command.add(function() return BuildPanel.sketch() ~= nil and not monitor.locked() end, {
   ["arduino:select-port"] = function() BuildPanel.choose_port() end,
 })
 

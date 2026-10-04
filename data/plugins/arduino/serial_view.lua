@@ -186,11 +186,16 @@ end
 
 
 ---Lets the user choose the baud rate of the open sketch, then connects at it.
-function SerialView.choose_baud()
+---@param after? fun() Called once a rate was chosen (e.g. to connect)
+function SerialView.choose_baud(after)
   local sketch = BuildPanel.sketch()
   if not sketch then return end
+  local locked = monitor.locked()
+  if locked then
+    core.warn("%s", locked)
+    return
+  end
   local current, _, file = monitor.baud_for(sketch.dir)
-  if monitor.session then current = monitor.session.baud end
   local detected = monitor.detect_baud(sketch.dir)
   -- the current rate first, so Enter keeps it
   local items = {}
@@ -205,11 +210,7 @@ function SerialView.choose_baud()
       local baud = tonumber(item and item.text or text)
       if not baud then return end
       monitor.choose_baud(sketch.dir, baud)
-      -- connecting again restarts many boards (e.g. Uno, Nano): only for another rate
-      local state = monitor.state()
-      if baud ~= current and (state == "connected" or state == "connecting" or state == "waiting") then
-        SerialView.connect()
-      end
+      if after then after() end
     end,
     suggest = function(text)
       local list = {}
@@ -272,8 +273,6 @@ function SerialView.state_text()
     return string.format("%s at %d baud", session.port, session.baud), style.good
   elseif state == "connecting" then
     return "connecting to " .. session.port .. "...", style.accent
-  elseif state == "paused" then
-    return "paused while uploading", style.warn
   elseif state == "waiting" then
     return "waiting for " .. monitor.waiting.port .. " to come back", style.warn
   end
@@ -311,8 +310,9 @@ function SerialView:layout()
       run = function() monitor.set_timestamps(not monitor.timestamps()) end },
     connected and { id = "serial:disconnect", text = "Disconnect", run = function() monitor.disconnect() end }
       or { id = "serial:connect", text = "Connect", run = SerialView.connect, enabled = sketch ~= nil },
-    { id = "serial:baud", text = (baud or monitor.DEFAULT_BAUD) .. " baud", run = SerialView.choose_baud,
-      enabled = sketch ~= nil },
+    -- (not while connected: connecting again at another rate restarts many boards)
+    { id = "serial:baud", text = (baud or monitor.DEFAULT_BAUD) .. " baud", run = function() SerialView.choose_baud() end,
+      enabled = sketch ~= nil and not monitor.locked() },
   }) do
     local lw = font:get_width(link.text) + pad_x
     link.x, link.y, link.w, link.h = right - lw, y, lw, header_h
@@ -492,17 +492,6 @@ bottom_panels.add({ id = "serial", is_open = SerialView.is_open, close = functio
   show = function() SerialView.get():show() end })
 
 
--- an upload hides the Serial Monitor or Plotter behind the Output panel; bring
--- it back when the upload worked
-local shown_before_upload = nil
-table.insert(monitor.on_pause, function() shown_before_upload = bottom_panels.shown() end)
-table.insert(monitor.on_resume, function(run)
-  local id = shown_before_upload
-  shown_before_upload = nil
-  if (id == "serial" or id == "plotter") and run.state == "done" then bottom_panels.show(id) end
-end)
-
-
 command.add(nil, {
   ["arduino:toggle-serial-monitor"] = function()
     if SerialView.is_open() then SerialView.view:hide() else SerialView.get():show(true) end
@@ -521,8 +510,16 @@ command.add(function() return monitor.active() end, {
   ["arduino:serial-disconnect"] = function() monitor.disconnect() end,
 })
 
+command.add(function() return BuildPanel.sketch() ~= nil and not monitor.locked() end, {
+  ["arduino:serial-baud-rate"] = function() SerialView.choose_baud() end,
+})
+
+-- (the hint for unreadable text: a deliberate click, so it may disconnect)
 command.add(function() return BuildPanel.sketch() ~= nil end, {
-  ["arduino:serial-baud-rate"] = SerialView.choose_baud,
+  ["arduino:serial-change-baud-rate"] = function()
+    monitor.disconnect()
+    SerialView.choose_baud(function() SerialView.connect() end)
+  end,
 })
 
 command.add(nil, {

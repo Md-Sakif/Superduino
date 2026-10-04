@@ -129,49 +129,89 @@ return {
     click(view, "serial:timestamps")
     T.check(not monitor.timestamps(), "and off")
 
-    -- the list starts at the current rate: Enter keeps it without connecting again
-    local monitor_calls = select(2, T.fake_cli_calls():gsub("\nmonitor ", ""))
-    click(view, "serial:baud")
-    T.wait_until(function() return #core.command_view.suggestions > 1 end, 5, "the rates")
-    T.eq(core.command_view.suggestions[1].text, "115200", "the current rate is first")
-    T.key("return")
-    T.wait(0.5)
-    T.eq(select(2, T.fake_cli_calls():gsub("\nmonitor ", "")), monitor_calls, "the same rate does not connect again")
-    T.check(connected(), "and stays connected")
+    -- while connected the port is in use: Upload, the port, the baud rate and the
+    -- board are locked; the Build section says why and offers Disconnect
+    local BuildPanel = require "plugins.arduino.build_panel"
+    local BoardPanel = require "plugins.arduino.board_panel"
+    local function build_target(id)
+      for _, target in ipairs(BuildPanel.view.current_layout.targets) do
+        if target.id == id then return target end
+      end
+    end
+    local function upload_enabled()
+      for _, b in ipairs(BuildPanel.view.current_layout.buttons) do
+        if b.id == "build:upload" then return b.enabled end
+      end
+    end
+    local function board_clickable()
+      for _, target in ipairs(BoardPanel.view.current_layout.targets) do
+        if target.id:find("^change:") then return true end
+      end
+      return false
+    end
+    local function link(id)
+      view:layout()
+      for _, l in ipairs(view.links) do if l.id == id then return l end end
+    end
+    T.wait_until(function() return build_target("build:disconnect") end, 5, "the Build section's Serial row")
+    T.eq(upload_enabled(), false, "Upload is disabled")
+    T.eq(build_target("build:port"), nil, "the port cannot be changed")
+    T.eq(link("serial:baud").enabled, false, "the baud rate is locked")
+    T.wait_until(function() return BoardPanel.view.current_layout and BoardPanel.view.current_layout.locked end, 5,
+      "the Board section to lock")
+    T.eq(board_clickable(), false, "the board cannot be changed")
+    T.shot("serial-locked")
+    core.set_active_view(core.root_view:get_primary_node().active_view)
+    T.key("ctrl+u")
+    T.wait(0.3)
+    T.eq(build.last, nil, "Ctrl+U does not upload")
+    T.match(T.problems()[#T.problems()] or "", "Disconnect the Serial Monitor first", "and says why")
+    T.command("arduino:board-settings")
+    T.check(tostring(core.active_view) ~= "NewProjectView", "Board Settings does not open")
+    -- Disconnect in the Build section frees the port and unlocks everything
+    local disconnect = build_target("build:disconnect")
+    BuildPanel.view:on_mouse_pressed("left", disconnect.x + 2, BuildPanel.view.position.y + disconnect.y + 2, 1)
+    T.eq(monitor.state(), "disconnected", "Disconnect in the Build section closes the port")
+    T.wait_until(function() return upload_enabled() end, 5, "Upload to come back")
+    T.check(build_target("build:port") ~= nil, "the port can be changed again")
+    T.wait_until(function() return board_clickable() end, 5, "the board to unlock")
+    T.check(link("serial:baud").enabled, "the baud rate too")
 
-    -- another baud rate: connects again, and is remembered for the sketch
+    -- another baud rate, from a list that starts at the current one; remembered for the sketch
     click(view, "serial:baud")
     T.eq(core.active_view, core.command_view, "the baud rate is chosen from a list")
+    T.wait_until(function() return #core.command_view.suggestions > 1 end, 5, "the rates")
+    T.eq(core.command_view.suggestions[1].text, "115200", "the current rate is first")
     T.type("9600")
     T.wait_until(function() return #core.command_view.suggestions >= 1 end, 5, "the filtered rates")
     T.key("return")
-    T.wait_until(function() return has_line("Hello at 9600 baud") end, 10, "the board at 9600 baud")
     T.eq(monitor.baud_for(dir), 9600, "the rate is remembered")
+    T.eq(monitor.state(), "disconnected", "choosing it does not connect")
+    click(view, "serial:connect")
+    T.wait_until(function() return has_line("Hello at 9600 baud") end, 10, "the board at 9600 baud")
     -- until the sketch's Serial.begin() changes
     T.write_file(ino, (SKETCH:gsub("115200", "57600")))
     T.eq(monitor.baud_for(dir), 57600, "a changed Serial.begin() wins")
     T.write_file(ino, SKETCH)
     T.eq(monitor.baud_for(dir), 9600, "the chosen rate again for the old Serial.begin()")
 
-    -- unreadable text (a wrong baud rate) gets a hint once
+    -- unreadable text (a wrong baud rate) gets a hint once, which disconnects and
+    -- offers another rate
     T.fake_cli_set("serial_noise", true)
     T.wait_until(function() return has_line("Unreadable text", "hint") end, 10, "the noise hint")
     local noise_hint = has_line("Unreadable text", "hint")
-    T.eq(noise_hint and noise_hint.command, "arduino:serial-baud-rate", "it offers the baud rate choice")
+    T.eq(noise_hint and noise_hint.command, "arduino:serial-change-baud-rate", "it offers another rate")
     T.wait(1)
     T.eq(count_hints("Unreadable text"), 1, "only once per connection")
     T.fake_cli_set("serial_noise", false)
-
-    -- an upload pauses the monitor (the port is free), then it connects again
+    T.command(noise_hint.command)
+    T.eq(monitor.state(), "disconnected", "the hint disconnects")
+    T.eq(core.active_view, core.command_view, "and asks for the rate")
+    T.type("115200")
+    T.wait_until(function() return #core.command_view.suggestions == 1 end, 5, "the filtered rates")
+    T.key("return")
+    T.wait_until(function() return has_line("Hello at 115200 baud") and connected() end, 10, "the board at 115200 again")
     view:show(true)
-    core.set_active_view(core.root_view:get_primary_node().active_view)
-    T.key("ctrl+u")
-    T.check(monitor.state() == "paused", "uploading pauses the monitor")
-    T.check(OutputView.view.visible and not view.visible, "the Output panel shows the upload")
-    T.wait_until(function() return build.last and build.last.state ~= "running" end, 15, "the upload")
-    T.eq(build.last.state, "done", "the upload succeeds (the port was free)")
-    T.wait_until(connected, 10, "the monitor to connect again")
-    T.check(view.visible and not OutputView.view.visible, "the Serial Monitor shows again")
 
     -- the board is unplugged and plugged in again
     T.fake_cli_set("ports", T.array())
@@ -185,8 +225,14 @@ return {
     click(view, "serial:disconnect")
     T.eq(monitor.state(), "disconnected", "Disconnect closes the port")
     T.check(has_line("Disconnected from /dev/ttyUSB0", "info"), "and says so")
+    -- disconnected, uploading works again
+    core.set_active_view(core.root_view:get_primary_node().active_view)
+    T.key("ctrl+u")
+    T.wait_until(function() return build.last and build.last.state ~= "running" end, 15, "the upload")
+    T.eq(build.last.state, "done", "the upload succeeds once disconnected")
+    -- a port that cannot be opened (showing the monitor connects)
     T.fake_cli_set("monitor_denied", true)
-    click(view, "serial:connect")
+    view:show(true)
     T.wait_until(function() return has_line("Could not connect", "error") end, 10, "the failed connection")
     local hint = has_line("allow it", "hint")
     T.eq(hint and hint.command, "arduino:allow-serial-port-access", "a hint offers to allow serial port access")

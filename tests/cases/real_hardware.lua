@@ -14,7 +14,8 @@
 -- New Project with the board's settings, the Board and Build sections with
 -- the real port watch, a build error from the real compiler, an upload that
 -- needs the old bootloader setting (most Nano clones) fixed through its hint
--- and Board Settings, then the Serial Monitor and Plotter on the board.
+-- and Board Settings, then the Serial Monitor and Plotter on the board, which
+-- lock uploading while connected.
 local SKETCH = [[
 // Superduino hardware test: greets, prints numbers for the plotter, and
 // echoes what it receives with \r and \n made visible.
@@ -242,19 +243,25 @@ return {
     T.eq(table.concat(names, ","), "count,wave", "count and wave are plotted (greeting and echoes are not)")
     T.shot("hw-serial-plotter")
 
-    -- an upload pauses the connection, then it comes back on the restarted board
+    -- connected, uploading is locked (the port is in use); after Disconnect it works,
+    -- and connecting again shows the restarted board
     local greetings = count_lines("Superduino test ready")
     core.set_active_view(core.root_view:get_primary_node().active_view)
+    local uploads = build.last
     T.key("ctrl+u")
-    T.eq(monitor.state(), "paused", "uploading pauses the connection")
-    finished("the upload while connected")
-    T.eq(build.last.state, "done", "the upload succeeds (the port was freed)")
+    T.wait(0.3)
+    T.eq(build.last, uploads, "Ctrl+U does not upload while connected")
+    monitor.disconnect()
+    T.key("ctrl+u")
+    finished("the upload after disconnecting")
+    T.eq(build.last.state, "done", "the upload succeeds once disconnected")
+    click_tab("Serial Plotter")
     T.wait_until(function() return monitor.state() == "connected" end, 15, "the connection again")
-    T.check(PlotView.is_open(), "the plotter shows again")
     T.wait_until(function() return count_lines("Superduino test ready") > greetings end, 15,
       "the greeting of the restarted board")
 
     -- a wrong baud rate, then the right one again
+    monitor.disconnect()
     monitor.choose_baud(dir, 9600)
     SerialView.get():show()
     SerialView.connect()
@@ -266,6 +273,7 @@ return {
       end
     end, 15, "the hint about unreadable text")
     T.shot("hw-serial-wrong-baud")
+    monitor.disconnect()
     monitor.choose_baud(dir, 115200)
     greetings = count_lines("Superduino test ready")
     SerialView.connect()

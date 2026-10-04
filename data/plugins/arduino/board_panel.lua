@@ -9,6 +9,7 @@ local cli = require "plugins.arduino.cli"
 local project = require "plugins.arduino.project"
 local ui = require "plugins.arduino.ui"
 local NewProjectView = require "plugins.arduino.newprojectview"
+local monitor = require "plugins.arduino.serial_monitor"
 
 ---@class arduino.boardpanel : core.view
 local BoardPanel = View:extend()
@@ -137,6 +138,11 @@ end
 function BoardPanel.open_settings(step)
   local info = BoardPanel.current()
   if not info then return end
+  local locked = monitor.locked()
+  if locked then
+    core.warn("%s", locked)
+    return
+  end
   if cli.status ~= "ok" then
     core.error("arduino-cli is not available; see the Arduino CLI section on the welcome screen")
     return
@@ -159,23 +165,33 @@ function BoardPanel:layout(content)
     L.message_y = y
     y = y + line_h
   end
+  -- changing the board would restart it under the Serial Monitor: locked while connected
+  L.locked = monitor.locked() ~= nil
   -- each row is clickable as a whole
   for _, row in ipairs(content.rows) do
     local r = { row = row, id = "change:" .. row.step, y = y, value_x = x + pad_x + label_w + pad_x / 2 }
     table.insert(L.rows, r)
-    table.insert(L.targets, { id = r.id, x = x, y = y, w = w, h = line_h,
-      run = function() BoardPanel.open_settings(row.step) end })
+    if not L.locked then
+      table.insert(L.targets, { id = r.id, x = x, y = y, w = w, h = line_h,
+        run = function() BoardPanel.open_settings(row.step) end })
+    end
     y = y + line_h
   end
   -- a link to the board's configuration, or "Set Board..." when there is no board yet
   if #content.rows == 0 or content.has_options then
     L.wide = { id = "change:options", y = y,
       text = #content.rows == 0 and "Set Board..." or "Manage Configuration..." }
-    table.insert(L.targets, { id = L.wide.id, x = x, y = y, w = w, h = line_h,
-      run = function() BoardPanel.open_settings(#content.rows == 0 and 1 or 4) end })
+    if not L.locked then
+      table.insert(L.targets, { id = L.wide.id, x = x, y = y, w = w, h = line_h,
+        run = function() BoardPanel.open_settings(#content.rows == 0 and 1 or 4) end })
+    end
     y = y + line_h
   elseif content.options_known then
     L.no_options_y = y
+    y = y + line_h
+  end
+  if L.locked then
+    L.locked_y = y
     y = y + line_h
   end
   L.height = y + pad_y
@@ -253,9 +269,13 @@ function BoardPanel:draw()
     local hovered = self.hovered_id == r.id
     if hovered then renderer.draw_rect(x, y + r.y, w, line_h, style.line_highlight) end
     text_at(style.dim, r.row.label, x + pad_x, r.y, w)
-    text_at(hovered and style.accent or style.text, r.row.value, r.value_x, r.y, x + w - pad_x - r.value_x)
+    text_at(hovered and style.accent or (L.locked and style.dim or style.text), r.row.value, r.value_x, r.y,
+      x + w - pad_x - r.value_x)
   end
   if L.no_options_y then text_at(style.dim, "This board has no options.", x + pad_x, L.no_options_y, w - pad_x * 2) end
+  if L.locked_y then
+    text_at(style.dim, "Locked by the Serial Monitor.", x + pad_x, L.locked_y, w - pad_x * 2)
+  end
   if L.wide then
     local hovered = self.hovered_id == L.wide.id
     if hovered then renderer.draw_rect(x, y + L.wide.y, w, line_h, style.line_highlight) end

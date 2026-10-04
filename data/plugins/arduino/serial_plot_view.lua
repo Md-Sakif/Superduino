@@ -164,8 +164,8 @@ function PlotView:layout()
     { id = "plot:window", text = plot.window() .. " points", run = PlotView.choose_window },
     state ~= "disconnected" and { id = "plot:disconnect", text = "Disconnect", run = function() monitor.disconnect() end }
       or { id = "plot:connect", text = "Connect", run = SerialView.connect, enabled = sketch ~= nil },
-    { id = "plot:baud", text = (baud or monitor.DEFAULT_BAUD) .. " baud", run = SerialView.choose_baud,
-      enabled = sketch ~= nil },
+    { id = "plot:baud", text = (baud or monitor.DEFAULT_BAUD) .. " baud", run = function() SerialView.choose_baud() end,
+      enabled = sketch ~= nil and not monitor.locked() },
   }) do
     local lw = font:get_width(link.text) + pad_x
     link.x, link.y, link.w, link.h = right - lw, y, lw, header_h

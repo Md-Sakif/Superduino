@@ -1,11 +1,11 @@
 -- The serial monitor: what a board prints over its serial port, and text sent
--- to it, through `arduino-cli monitor`. One connection at a time; it pauses
--- while an upload uses the port and connects again afterwards.
+-- to it, through `arduino-cli monitor`. One connection at a time; while it is
+-- connected it holds the port, so uploading and changing the board or baud
+-- rate wait until it is disconnected (see `monitor.locked`).
 local core = require "core"
 local common = require "core.common"
 local storage = require "core.storage"
 local cli = require "plugins.arduino.cli"
-local build = require "plugins.arduino.build"
 local ports = require "plugins.arduino.ports"
 
 local monitor = {}
@@ -42,12 +42,8 @@ monitor.dropped = 0
 
 ---The connection: { port, baud, fqbn?, protocol?, state = "connecting"|"connected"|"closed"|"failed", proc }
 monitor.session = nil
----The connection paused by an upload, to connect again after it: { port, baud, fqbn?, protocol? }
-monitor.paused = nil
 ---After a board was unplugged: { port, baud, fqbn?, protocol? }, to connect again when it is back.
 monitor.waiting = nil
----Functions called when the monitor pauses for an upload and when it resumes.
-monitor.on_pause, monitor.on_resume = {}, {}
 ---Functions called with every complete received line (e.g. the plotter).
 ---@type fun(line: arduino.serial_line)[]
 monitor.on_line = {}
@@ -263,12 +259,11 @@ end
 -- The connection
 -------------------------------------------------------------------------------
 
----"disconnected", "connecting", "connected", "paused" (for an upload) or
----"waiting" (for an unplugged board to come back).
+---"disconnected", "connecting", "connected" or "waiting" (for an unplugged
+---board to come back).
 function monitor.state()
   local session = monitor.session
   if session and (session.state == "connecting" or session.state == "connected") then return session.state end
-  if monitor.paused then return "paused" end
   if monitor.waiting then return "waiting" end
   return "disconnected"
 end
@@ -277,6 +272,15 @@ end
 ---Whether the monitor uses (or is about to use) a port.
 function monitor.active()
   return monitor.state() ~= "disconnected"
+end
+
+
+---Why uploading and changing the board or baud rate are not possible now, or
+---nil when they are: the connection holds the port (an upload would fail with
+---"busy"), and changing the board or baud rate would restart the board.
+---@return string?
+function monitor.locked()
+  if monitor.active() then return "Disconnect the Serial Monitor first: it is using the board's port." end
 end
 
 
@@ -307,8 +311,8 @@ local function check_noise(session, data)
   if session.seen >= NOISE_SAMPLE and session.noise / session.seen >= NOISE_SHARE then
     session.noise_hinted = true
     monitor.add_note("hint", string.format("Unreadable text? The board may use another baud rate than %d (see "
-      .. "Serial.begin(...) in its sketch). Click here to choose the baud rate.", session.baud),
-      "arduino:serial-baud-rate")
+      .. "Serial.begin(...) in its sketch). Click here to disconnect and choose another rate.", session.baud),
+      "arduino:serial-change-baud-rate")
   end
 end
 
@@ -322,7 +326,7 @@ function monitor.connect(target)
     return false
   end
   monitor.disconnect(true)
-  monitor.waiting, monitor.paused = nil, nil
+  monitor.waiting = nil
   local args = { "monitor", "-p", target.port, "--config", "baudrate=" .. target.baud, "--quiet", "--no-color" }
   if target.protocol then
     table.insert(args, "-l")
@@ -447,40 +451,6 @@ core.add_thread(function()
     end
     coroutine.yield(0.25)
   end
-end)
-
-
--- an upload needs the port: pause, then connect again afterwards (to the
--- sketch's port, which some boards change while uploading)
-table.insert(build.on_start, 1, function(run)
-  if run.kind ~= "upload" then return end
-  local session = monitor.session or monitor.waiting
-  if not session then return end
-  local paused = { port = session.port, baud = session.baud, fqbn = session.fqbn, protocol = session.protocol }
-  -- (the upload starts with compiling, so the port is free long before it is needed)
-  monitor.disconnect(true)
-  monitor.paused = paused
-  monitor.add_note("info", "Paused while uploading.")
-  for _, fn in ipairs(monitor.on_pause) do fn(run) end
-end)
-
-table.insert(build.on_finish, function(run)
-  local paused = monitor.paused
-  if run.kind ~= "upload" or not paused then return end
-  core.add_thread(function()
-    -- give the board a moment to start again (and a new port to appear)
-    coroutine.yield(0.5)
-    if monitor.paused ~= paused then return end
-    monitor.paused = nil
-    local target = { port = run.port or paused.port, baud = paused.baud, fqbn = paused.fqbn, protocol = paused.protocol }
-    if run.dir then
-      local port = ports.for_sketch(run.dir, paused.fqbn)
-      if port then target.port, target.protocol = port.address, port.protocol end
-      target.baud = monitor.baud_for(run.dir)
-    end
-    monitor.connect(target)
-    for _, fn in ipairs(monitor.on_resume) do fn(run) end
-  end)
 end)
 
 
