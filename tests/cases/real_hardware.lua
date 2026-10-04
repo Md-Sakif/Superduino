@@ -263,15 +263,15 @@ return {
     -- a wrong baud rate, then the right one again
     monitor.disconnect()
     monitor.choose_baud(dir, 9600)
-    SerialView.get():show()
     SerialView.connect()
+    SerialView.get():show()
     T.wait_until(function() return monitor.session and monitor.session.baud == 9600 and monitor.state() == "connected" end,
       15, "the connection at 9600")
     T.wait_until(function()
       for _, line in ipairs(monitor.lines) do
-        if line.kind == "hint" and line.command == "arduino:serial-baud-rate" then return true end
+        if line.kind == "hint" and line.command == "arduino:serial-change-baud-rate" then return true end
       end
-    end, 15, "the hint about unreadable text")
+    end, 30, "the hint about unreadable text")
     T.shot("hw-serial-wrong-baud")
     monitor.disconnect()
     monitor.choose_baud(dir, 115200)

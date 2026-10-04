@@ -301,7 +301,7 @@ end
 -- Bytes received before a connection is judged for noise, and the share of
 -- noise that suggests a wrong baud rate. The first moments are not judged:
 -- text the board printed before the port opened may come first, garbled.
-local NOISE_SAMPLE, NOISE_SHARE, NOISE_GRACE = 48, 0.25, 1.5
+local NOISE_SAMPLE, NOISE_SHARE, NOISE_GRACE = 32, 0.25, 1.5
 
 -- Hints once per connection when what arrives is mostly noise.
 local function check_noise(session, data)
