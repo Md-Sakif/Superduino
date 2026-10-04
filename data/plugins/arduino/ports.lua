@@ -22,6 +22,8 @@ ports.state = "idle"
 ports.error = nil
 
 local STORAGE_MODULE, STORAGE_KEY = "arduino", "ports"
+---Seconds between listings while the watch reports no board (see `ports.start`).
+ports.RELIST_INTERVAL = 10
 local watcher -- { proc } of the running watch
 
 
@@ -101,18 +103,28 @@ end
 
 
 ---Lists the ports once (`board list --json`). Must be called from a thread.
+---@param merge? boolean Keep ports already known (e.g. reported by the watch meanwhile)
 ---@return boolean ok
 ---@return string? error
-function ports.refresh()
+function ports.refresh(merge)
   local result, err = cli.run_json({ "board", "list" })
   if not result then
     ports.error = err
     return false, err
   end
   local list = {}
+  local seen = {}
   for _, entry in ipairs(type(result.detected_ports) == "table" and result.detected_ports or {}) do
     local port = to_port(entry)
-    if port then table.insert(list, port) end
+    if port then
+      table.insert(list, port)
+      seen[port.protocol .. " " .. port.address] = true
+    end
+  end
+  if merge then
+    for _, port in ipairs(ports.list) do
+      if not seen[port.protocol .. " " .. port.address] then table.insert(list, port) end
+    end
   end
   ports.error = nil
   set_list(list)
@@ -126,11 +138,13 @@ function ports.start()
   local proc, err = cli.start({ "board", "list", "--watch", "--json" })
   if not proc then
     ports.state, ports.error = "stopped", err
+    core.log_quiet("Could not follow connected boards: %s", tostring(err))
     return
   end
   local this = { proc = proc }
   watcher = this
   ports.state = "watching"
+  core.log_quiet("Following connected boards (arduino-cli board list --watch)")
   core.add_thread(function()
     local buffer = ""
     while true do
@@ -139,16 +153,22 @@ function ports.start()
         return
       end
       local out = proc:read_stdout(4096)
+      local err_out = proc:read_stderr(4096)
+      if err_out and #err_out > 0 then core.log_quiet("board list --watch: %s", err_out) end
       if out and #out > 0 then
         local values
         values, buffer = ports.split_json_stream(buffer .. out)
         for _, text in ipairs(values) do
           local ok, event = pcall(json.decode, text)
-          if ok and type(event) == "table" then ports.apply_event(event) end
+          if ok and type(event) == "table" then
+            core.log_quiet("Board event: %s %s", tostring(event.eventType),
+              tostring(type(event.port) == "table" and event.port.address))
+            ports.apply_event(event)
+          end
         end
       elseif not proc:running() then
         break
-      else
+      elseif not (err_out and #err_out > 0) then
         coroutine.yield(0.1)
       end
     end
@@ -158,6 +178,24 @@ function ports.start()
       ports.state = "stopped"
       core.warn("Stopped following connected boards (arduino-cli exited with %s)", tostring(proc:returncode()))
       ports.refresh()
+    end
+  end)
+  -- Boards plugged in before the watch started should come as its first
+  -- events, but a missed one would hide a connected board until it is plugged
+  -- in again: list them once now, and again from time to time while none is
+  -- known.
+  core.add_thread(function()
+    local next_list = 0
+    while watcher == this do
+      if system.get_time() >= next_list and (next_list == 0 or #ports.list == 0) then
+        local before = #ports.list
+        local ok = ports.refresh(true)
+        if ok and #ports.list ~= before then
+          core.log_quiet("Listing the boards found %d port(s) the watch had not reported", #ports.list - before)
+        end
+        next_list = system.get_time() + ports.RELIST_INTERVAL
+      end
+      coroutine.yield(1)
     end
   end)
 end

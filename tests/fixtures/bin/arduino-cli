@@ -59,6 +59,9 @@ DEFAULT_STATE = {
     "details_fail": False,
     # connected boards for `board list`: {address, label, protocol, protocol_label, boards: [[name, fqbn]]}
     "ports": [],
+    # `board list --watch` misses the ports present when it starts, or reports nothing at all
+    "watch_misses_initial": False,
+    "watch_silent": False,
     "compile_slow": False,     # compiling takes long (for cancel tests)
     "upload_denied": False,    # opening the port fails with "Permission denied"
     "upload_no_sync": False,   # the board does not answer the uploader (avrdude "not in sync")
@@ -288,9 +291,14 @@ def port_json(port):
 
 def board_list_watch():
     """Like `board list --watch --json`: an event per change, as pretty JSON objects."""
-    known = {}
+    state = load_state()
+    known = {p["address"]: p for p in state["ports"]} if state.get("watch_misses_initial") else {}
     while True:
-        current = {p["address"]: p for p in load_state()["ports"]}
+        state = load_state()
+        if state.get("watch_silent"):
+            time.sleep(0.1)
+            continue
+        current = {p["address"]: p for p in state["ports"]}
         for address in list(known):
             if address not in current:
                 event = dict(port_json(known.pop(address)), eventType="remove")
